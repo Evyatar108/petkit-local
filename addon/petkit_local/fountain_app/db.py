@@ -151,6 +151,11 @@ ROW_LIMIT = 20000
 #: `IN (...)` lists are split to stay under SQLite's bound-variable limit.
 _IN_CHUNK = 400
 VISIT_KINDS = (codes.KIND_PET, codes.KIND_DRINKING)
+#: How long after the span a drinking report is still read, for a drink-over
+#: whose reported `event_start` lies inside the span. With no drink-start row
+#: that late report is the episode's only row. Drinks last minutes; the slack
+#: also covers a report the device sent late.
+DRINK_REPORT_LAG_SEC = 6 * 3600
 
 
 async def _linked_rows(store: EventStore, device_id: int,
@@ -183,16 +188,22 @@ async def visit_rows(store: EventStore, device_id: int, start_ts: float, end_ts:
     """The rows of every visit that can start in `[start_ts, end_ts)`, episodes whole.
 
     Rows that arrived within `window_sec` of the span find the visits: the
-    widening lets a drink join an appearance across the boundary. Every
-    episode those rows belong to is then read whole by `related_event` and
+    widening lets a drink join an appearance across the boundary. Drinking
+    rows are read `DRINK_REPORT_LAG_SEC` further on, because a drink-over
+    files by the start it reports, not by when it arrived. Every episode
+    those rows belong to is then read whole by `related_event` and
     `parent_event`, so a drink that ends long after midnight keeps its
-    drink-over row and its duration.
+    drink-over row and its duration. The extra rows only add drinks the
+    span would otherwise miss; the caller still keeps a visit only if it
+    starts in the span, and the neighbouring day computes the same start
+    from the same whole episodes, so no visit is listed on two days.
     """
     rows: list[dict[str, Any]] = []
     for kind in VISIT_KINDS:
+        lag = DRINK_REPORT_LAG_SEC if kind == codes.KIND_DRINKING else 0
         rows += await store.query_timeline(
             device_id=device_id, start_ts=start_ts - window_sec,
-            end_ts=end_ts + window_sec, event_kind=kind, limit=ROW_LIMIT)
+            end_ts=end_ts + window_sec + lag, event_kind=kind, limit=ROW_LIMIT)
     keys = sorted({k for r in rows for k in (r.get("related_event"), r.get("parent_event"))
                    if k})
     seen = {r["id"] for r in rows}

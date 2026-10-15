@@ -9,6 +9,7 @@ import json
 from datetime import datetime
 from pathlib import Path
 
+import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from petkit_local.ai.pets import PetRegistry
@@ -607,19 +608,32 @@ async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
         await store.close()
         await store2.close()
 
-async def test_a_drink_that_ends_after_midnight_keeps_its_duration(tmp_path):
-    """Review repro: appearance 23:58, drink 23:59:30 to 00:10 the next day."""
+
+@pytest.mark.parametrize(("with_appearance", "with_start"), [
+    (True, True), (True, False), (False, False)],
+    ids=["appearance-and-drink-start", "no-drink-start", "drink-over-alone"])
+async def test_a_drink_that_ends_after_midnight_keeps_its_duration(
+        tmp_path, with_appearance, with_start):
+    """Review repro: appearance 23:58, drink 23:59:30 to 00:10 the next day.
+
+    The drink-over arrives at 00:10, long after the visit window, and without
+    a drink-start it is the episode's only row; it files by the start it reports.
+    """
     app, _reg, store, pets = _panel(tmp_path)
     archie = await pets.create("Archie")
     t0 = datetime(2026, 10, 14, 23, 58).timestamp()
     drink = datetime(2026, 10, 14, 23, 59, 30).timestamp()
     over = datetime(2026, 10, 15, 0, 10).timestamp()
-    await _seed(store, _appearance(t0, pet_id=archie["id"]) + _drink(drink, end=over))
+    rows = _drink(drink, end=over, with_start=with_start)
+    if with_appearance:
+        rows = _appearance(t0, pet_id=archie["id"]) + rows
+    await _seed(store, rows)
     c = await _client(app)
     try:
         day = await (await c.get("/api/fountain/visits?date=2026-10-14")).json()
         [visit] = day["visits"]
-        assert visit["visit_key"] == "A" and visit["has_drinking"]
+        assert visit["visit_key"] == ("A" if with_appearance else "B")
+        assert visit["has_appearance"] == with_appearance and visit["has_drinking"]
         assert visit["duration_sec"] == 630
         assert visit["drink_end_ts"] == over
         after = await (await c.get("/api/fountain/visits?date=2026-10-15")).json()
