@@ -44,3 +44,22 @@ class VisitLabel(FountainBase):
     visit_key: Mapped[str] = mapped_column(Text, nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     labeled_at: Mapped[float] = mapped_column(REAL, nullable=False)
+
+
+class FountainAlert(FountainBase):
+    """One alert, from the moment its condition held to the moment it ended.
+
+    `kind` is `no_drink` or `tank`. `subject` names what the alert is about,
+    one active row per subject: `pet:<id>` for a cat, `<device id>:<flag>`
+    for a tank. `cleared_at` is null while the alert is active. `detail` is a
+    JSON object with the message shown in the banner and the facts behind it.
+    """
+
+    __tablename__ = "fountain_alerts"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, nullable=False)
+    subject: Mapped[str] = mapped_column(Text, nullable=False, index=True)
+    started_at: Mapped[float] = mapped_column(REAL, nullable=False)
+    cleared_at: Mapped[float | None] = mapped_column(REAL)
+    detail: Mapped[str | None] = mapped_column(Text)

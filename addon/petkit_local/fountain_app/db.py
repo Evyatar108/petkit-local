@@ -10,12 +10,13 @@ to this module.
 from __future__ import annotations
 
 import asyncio
+import json
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import delete, select
+from sqlalchemy import delete, select, update
 
-from petkit_local.fountain_app.models import FountainBase, VisitLabel
+from petkit_local.fountain_app.models import FountainAlert, FountainBase, VisitLabel
 
 if TYPE_CHECKING:
     from petkit_local.events.store import EventStore
@@ -90,3 +91,51 @@ async def delete_label(store: EventStore, device_id: int, visit_key: str) -> boo
                                      VisitLabel.visit_key == visit_key),
             execution_options={"synchronize_session": False})
         return bool(result.rowcount)
+
+
+def _alert_dict(row: FountainAlert) -> dict[str, Any]:
+    try:
+        detail = json.loads(row.detail) if row.detail else {}
+    except ValueError:
+        detail = {}
+    return {"id": row.id, "kind": row.kind, "subject": row.subject,
+            "started_at": row.started_at, "cleared_at": row.cleared_at,
+            "detail": detail if isinstance(detail, dict) else {}}
+
+
+async def active_alerts(store: EventStore) -> list[dict[str, Any]]:
+    """Every alert not yet cleared, oldest first."""
+    async with store._read() as session:
+        rows = await session.scalars(
+            select(FountainAlert).where(FountainAlert.cleared_at.is_(None))
+            .order_by(FountainAlert.started_at, FountainAlert.id))
+        return [_alert_dict(r) for r in rows]
+
+
+async def cleared_alerts(store: EventStore, since: float, limit: int = 50) -> list[dict[str, Any]]:
+    """Alerts cleared at or after `since`, most recently cleared first."""
+    async with store._read() as session:
+        rows = await session.scalars(
+            select(FountainAlert).where(FountainAlert.cleared_at >= since)
+            .order_by(FountainAlert.cleared_at.desc()).limit(limit))
+        return [_alert_dict(r) for r in rows]
+
+
+async def raise_alert(store: EventStore, kind: str, subject: str, detail: dict[str, Any],
+                      now: float) -> dict[str, Any]:
+    """Record a new active alert and return it."""
+    async with store._write() as session:
+        row = FountainAlert(kind=kind, subject=subject, started_at=now,
+                            detail=json.dumps(detail))
+        session.add(row)
+        await session.flush()
+        return _alert_dict(row)
+
+
+async def clear_alert(store: EventStore, alert_id: int, now: float) -> None:
+    """Mark one alert as ended."""
+    async with store._write() as session:
+        await session.execute(
+            update(FountainAlert).where(FountainAlert.id == alert_id)
+            .values(cleared_at=now),
+            execution_options={"synchronize_session": False})

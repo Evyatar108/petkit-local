@@ -5,6 +5,7 @@ appearance `20` with its own `related_event`, detection `24` pointing back at
 it through `parent_event`, and drinking `5`/`6` sharing a different
 `related_event` with `event_start`/`event_end` on the drink-over.
 """
+import json
 from datetime import datetime
 from pathlib import Path
 
@@ -440,3 +441,118 @@ async def test_a_second_export_while_one_runs_is_refused(tmp_path):
     finally:
         await c.close()
         await store.close()
+
+# --- alerts -----------------------------------------------------------------
+
+
+async def test_no_drink_alerts_follow_attributed_drinking_visits(tmp_path):
+    from petkit_local.fountain_app import alerts, db
+
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    holly = await pets.create("Holly")
+    hub = app["hub"]
+    t0 = 1_792_000_000.0
+    hour = 3600
+    await _seed(store, _appearance(t0, pet_id=archie["id"]) + _drink(t0 + 97, end=t0 + 171))
+    try:
+        # No events from before the 12-hour window yet: nothing is judged.
+        assert await alerts.check_app(app, now=t0 + hour) == {"raised": [], "cleared": []}
+
+        await _seed(store, _drink(t0 - 20 * hour, rel="OLD", end=t0 - 20 * hour + 30,
+                                  first_id=50))
+        first = await alerts.check_app(app, now=t0 + hour)
+        assert [a["subject"] for a in first["raised"]] == [f"pet:{holly['id']}"]
+        assert first["raised"][0]["detail"]["message"] == (
+            "Holly has not drunk from the fountain in 12 hours")
+        assert first["raised"][0]["detail"]["last_drink_ts"] is None
+
+        later = await alerts.check_app(app, now=t0 + 13 * hour)
+        assert [a["subject"] for a in later["raised"]] == [f"pet:{archie['id']}"]
+        assert later["raised"][0]["detail"]["last_drink_ts"] == t0
+        assert later["cleared"] == []
+
+        await _seed(store, _drink(t0 + 13.5 * hour, rel="H", end=t0 + 13.5 * hour + 40,
+                                  first_id=60))
+        await db.set_label(store, FOUNTAIN, "H", str(holly["id"]))
+        cleared = await alerts.check_app(app, now=t0 + 14 * hour)
+        assert cleared["raised"] == []
+        assert [a["subject"] for a in cleared["cleared"]] == [f"pet:{holly['id']}"]
+        assert await alerts.check_app(app, now=t0 + 14 * hour + 60) == {
+            "raised": [], "cleared": []}
+        assert [a["subject"] for a in await db.active_alerts(store)] == [f"pet:{archie['id']}"]
+    finally:
+        await store.close()
+    logged = [e["summary"] for e in hub.recent(kinds={alerts.HUB_KIND})]
+    assert logged == ["Holly has not drunk from the fountain in 12 hours",
+                      "Archie has not drunk from the fountain in 12 hours",
+                      "Cleared: Holly has not drunk from the fountain in 12 hours"]
+
+
+async def test_tank_alerts_follow_error_start_and_error_over(tmp_path):
+    from petkit_local.events.normalize import from_mqtt
+    from petkit_local.fountain_app import alerts
+
+    app, reg, store, _pets = _panel(tmp_path)
+    dev = reg.get(FOUNTAIN)
+    t0 = 1_792_000_000.0
+
+    async def report(event_type, err, ts, eid):
+        row = from_mqtt(dev, event_type, {"event_id": eid, "content": json.dumps({"err": err})})
+        await store.upsert_event(row | {"ts": ts})
+
+    try:
+        await report("error_start", "tankCL", t0, "e1")
+        await report("error_start", "taryF", t0 + 1, "e2")
+        raised = (await alerts.check_app(app, now=t0 + 60))["raised"]
+        assert [(a["kind"], a["subject"]) for a in raised] == [("tank", f"{FOUNTAIN}:tankCL")]
+        assert raised[0]["detail"]["message"] == f"Clean water tank low (fountain #{FOUNTAIN})"
+
+        await report("error_start", "tankDF", t0 + 100, "e3")
+        await report("error_over", "tankCL", t0 + 200, "e4")
+        step = await alerts.check_app(app, now=t0 + 260)
+        assert [a["subject"] for a in step["raised"]] == [f"{FOUNTAIN}:tankDF"]
+        assert [a["subject"] for a in step["cleared"]] == [f"{FOUNTAIN}:tankCL"]
+    finally:
+        await store.close()
+
+
+def test_an_error_over_naming_nothing_clears_every_tank_flag():
+    from petkit_local.fountain_app.alerts import active_tank_flags
+
+    def row(event_type, ts, content):
+        return {"device_type": "w7h", "event_type": event_type, "ts": ts,
+                "content_json": json.dumps(content)}
+
+    rows = [row("error_start", 1, {"err": "tankCL,tankDF"}),
+            row("error_over", 2, {})]
+    assert active_tank_flags(rows) == {}
+    assert set(active_tank_flags(rows[:1])) == {"tankCL", "tankDF"}
+
+
+async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
+    app, _reg, store, _pets = _panel(tmp_path)
+    c = await _client(app)
+    try:
+        assert any(t.get_name() == "fountain-alerts" for t in app["background_tasks"])
+        assert await (await c.get("/api/fountain/alert-settings")).json() == {
+            "no_drink_hours": 12.0}
+        for bad in (0.5, 200, "soon", True, None):
+            r = await c.post("/api/fountain/alert-settings", json={"no_drink_hours": bad})
+            assert r.status == 400, bad
+        r = await c.post("/api/fountain/alert-settings", json={"no_drink_hours": 24})
+        assert r.status == 200
+        body = await (await c.get("/api/fountain/alerts")).json()
+        assert body == {"active": [], "recent": [], "settings": {"no_drink_hours": 24.0}}
+    finally:
+        await c.close()
+    assert not app["background_tasks"]
+    app2, _reg2, store2, _pets2 = _panel(tmp_path)
+    c = await _client(app2)
+    try:
+        assert await (await c.get("/api/fountain/alert-settings")).json() == {
+            "no_drink_hours": 24.0}
+    finally:
+        await c.close()
+        await store.close()
+        await store2.close()

@@ -20,6 +20,10 @@ class FountainState:
     tables: TableGuard = field(default_factory=TableGuard)
     #: Held while a dataset export runs; a second one is refused, not queued.
     export_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Serializes alert checks (the periodic task and a settings change).
+    alert_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: `alerts.load_settings` result, read on first use.
+    alert_settings: dict[str, float] | None = None
 
 
 def state_of(app: web.Application) -> FountainState:

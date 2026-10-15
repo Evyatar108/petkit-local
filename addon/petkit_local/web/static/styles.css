@@ -1891,3 +1891,14 @@ button.help[aria-expanded='true'] {
 .fx-stats details {
   margin-top: 8px;
 }
+.fx-alert-list {
+  margin: 0 0 8px;
+  padding-left: 18px;
+}
+.fx-alert-setting {
+  align-items: center;
+  margin-top: 6px;
+}
+.fx-alert-setting .fx-hours {
+  width: 5em;
+}

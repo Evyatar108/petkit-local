@@ -181,6 +181,34 @@ async function loadStats() {
   if (el) el.outerHTML = statsHtml(st);
 }
 
+// Active alerts as a banner, with the no-drink threshold beside them. The
+// server raises and clears them once a minute; this only reads.
+function alertsHtml(al) {
+  if (!al || al.error) return '<div class="fx-alerts"></div>';
+  const since = a => {
+    const ts = a.kind === 'tank' ? a.detail.since_ts : a.detail.last_drink_ts;
+    if (!ts) return '';
+    const what = a.kind === 'tank' ? 'since' : 'last drank';
+    return ` <span class="mut">(${what} ${esc(new Date(ts * 1000).toLocaleString())})</span>`;
+  };
+  const items = al.active
+    .map(a => `<li><b>${esc(a.detail.message || a.subject)}</b>${since(a)}</li>`)
+    .join('');
+  const hours = al.settings ? al.settings.no_drink_hours : 12;
+  const setting = `<div class="row fx-alert-setting"><span class="mut">Alert when a cat has not drunk for</span>
+    <input type="number" class="fx-hours" min="1" max="168" step="1" value="${esc(hours)}"> <span class="mut">hours</span>
+    <button class="ghost act" data-action="fx-alert-save">Save</button></div>`;
+  return al.active.length
+    ? `<div class="card notice fx-alerts"><ul class="fx-alert-list">${items}</ul>${setting}</div>`
+    : `<div class="card fx-alerts"><span class="mut">No active alerts.</span>${setting}</div>`;
+}
+
+async function loadAlerts() {
+  const al = await api('fountain/alerts');
+  const el = document.querySelector('#fountainView .fx-alerts');
+  if (el) el.outerHTML = alertsHtml(al);
+}
+
 async function loadFountain() {
   if (!FX_DATE) FX_DATE = todayLocal();
   const q = new URLSearchParams({ date: FX_DATE });
@@ -204,8 +232,10 @@ async function loadFountain() {
     : '<div class="card"><p class="mut">No visits on this day.</p></div>';
   v.innerHTML =
     controlsHtml(data) +
+    '<div class="fx-alerts"></div>' +
     '<div class="card fx-stats"><p class="mut">Loading stats…</p></div>' +
     `<div id="fxList">${visits}</div>`;
+  loadAlerts();
   loadStats();
 }
 
@@ -253,6 +283,20 @@ onAction('fx-label', el => setLabel(el.dataset.visit, el.dataset.label));
 onAction('fx-unlabel', el => setLabel(el.dataset.visit, null));
 onAction('fx-shift', el => shiftDay(Number(el.dataset.n)));
 onAction('fx-refresh', () => loadFountain());
+onAction('fx-alert-save', async el => {
+  const input = el.closest('.fx-alerts').querySelector('.fx-hours');
+  const r = await api('fountain/alert-settings', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ no_drink_hours: Number(input.value) }),
+  });
+  if (r.error) {
+    toast('Could not save: ' + r.error);
+    return;
+  }
+  toast(`No-drink alert set to ${r.settings.no_drink_hours} hours`);
+  loadAlerts();
+});
 onAction('fx-export', async el => {
   el.disabled = true;
   const label = el.textContent;
