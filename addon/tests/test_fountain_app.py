@@ -733,7 +733,10 @@ def _items(body):
     return {i["key"]: i for i in body["items"]}
 
 
-async def test_status_of_a_fountain_where_everything_is_fine(tmp_path):
+async def test_status_of_a_fountain_where_everything_is_fine(tmp_path, monkeypatch):
+    from petkit_local.fountain_app import status as status_mod
+
+    monkeypatch.setattr(status_mod, "local_offset_hours", lambda when=None: 0.0)
     app, reg, store, _pets = _panel(tmp_path)
     _fine_fountain(reg)
     try:
@@ -754,9 +757,30 @@ async def test_status_of_a_fountain_where_everything_is_fine(tmp_path):
     assert items["clean_tank"]["value"] == items["waste_tank"]["value"] == "OK"
     assert items["water_change"]["value"] == "Every 3 days at 08:15"
     assert items["water_change"]["detail"] == {"enabled": True, "cycle_days": 3,
-                                               "time": "08:15"}
+                                               "time": "08:15", "device_time": "08:15"}
     assert items["flush"]["value"] == "Every day at 13:00"
     assert (items["alerts"]["value"], items["alerts"]["detail"]) == ("None", {"count": 0})
+
+
+async def test_status_shows_schedule_times_in_local_time(tmp_path, monkeypatch):
+    """The W7H runs its schedule on UTC (debt:timezone-resets-on-boot), so on
+    2026-10-15 its times were set to 16:00 and 17:00 to run at 09:00 and 10:00
+    in Los Angeles; the phone must show the local times."""
+    from petkit_local.fountain_app import status as status_mod
+
+    monkeypatch.setattr(status_mod, "local_offset_hours", lambda when=None: -7.0)
+    app, reg, store, _pets = _panel(tmp_path)
+    dev = _fine_fountain(reg)
+    dev.config["settings"].update(waterChangeCycle=1, waterChangeTime=57600,
+                                  flushCycle=3, flushTime=3600)
+    try:
+        _status_code, body = await _status(app)
+    finally:
+        await store.close()
+    items = _items(body)
+    assert items["water_change"]["value"] == "Every day at 09:00"
+    assert items["water_change"]["detail"]["device_time"] == "16:00"
+    assert items["flush"]["value"] == "Every 3 days at 18:00"
 
 
 async def test_status_reports_a_full_waste_tank_from_its_alert(tmp_path):

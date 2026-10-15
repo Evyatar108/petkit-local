@@ -17,9 +17,13 @@ unknown and the rest is still answered.
   and `settings.addWaterSwitch` (off is not ok: the bowl is not refilled).
 * **Tanks**: the active `tankCL` / `tankDF` alerts `alerts.py` raises from
   the fountain's error events, never the raw hall sensors.
-* **Scheduled water change and flush**: enabled, every N days, at HH:MM
-  (seconds since midnight on the device). Off is a choice and is ok; on
-  without a usable cycle or time is unknown.
+* **Scheduled water change and flush**: enabled, every N days, at HH:MM in
+  the server's local time. The device stores seconds since midnight on its
+  own clock, and the W7H (firmware 456) keeps that clock on UTC whatever it
+  is told (`debt:timezone-resets-on-boot` in the fountain repo's
+  DECISIONS.md), so the device time is read as UTC and converted; `detail`
+  keeps it as `device_time`. Off is a choice and is ok; on without a usable
+  cycle or time is unknown.
 * **Alerts**: how many alerts of any kind are active.
 """
 from __future__ import annotations
@@ -37,6 +41,7 @@ from petkit_local.fountain_app.api import _device, _device_summary
 from petkit_local.fountain_app.state import state_of
 from petkit_local.ha.publisher import device_is_stale
 from petkit_local.utils.coerce import to_int
+from petkit_local.utils.timeutil import local_offset_hours
 
 #: The add-on's default `offline_timeout`, in seconds.
 OFFLINE_TIMEOUT_SEC = Config.offline_timeout
@@ -97,13 +102,17 @@ def flow_items(settings: dict[str, Any]) -> list[dict[str, Any]]:
     ]
 
 
-def schedule_items(settings: dict[str, Any]) -> list[dict[str, Any]]:
+def schedule_items(settings: dict[str, Any], local_offset: float) -> list[dict[str, Any]]:
+    """`local_offset`: hours east of UTC here; device times are on UTC (see module doc)."""
     out = []
     for key, label, enable, cycle_name, time_name in SCHEDULES:
         enabled = _switch(settings, enable)
         cycle = to_int(settings.get(cycle_name), None)
         cycle = cycle if cycle is not None and cycle >= 1 else None
-        at = hhmm(settings.get(time_name))
+        device_secs = to_int(settings.get(time_name), None)
+        device_at = hhmm(device_secs)
+        at = None if device_at is None else hhmm(
+            (device_secs + round(local_offset * 3600)) % 86400)
         if enabled is None:
             value, ok = None, None
         elif not enabled:
@@ -113,7 +122,8 @@ def schedule_items(settings: dict[str, Any]) -> list[dict[str, Any]]:
         else:
             every = "Every day" if cycle == 1 else f"Every {cycle} days"
             value, ok = f"{every} at {at}", True
-        out.append(_item(key, label, value, ok, enabled=enabled, cycle_days=cycle, time=at))
+        out.append(_item(key, label, value, ok, enabled=enabled, cycle_days=cycle, time=at,
+                         device_time=device_at))
     return out
 
 
@@ -146,7 +156,8 @@ def build_status(dev: Any, active: list[dict[str, Any]] | None,
     settings = config.get("settings")
     settings = settings if isinstance(settings, dict) else {}
     items = [online_item(dev, now), *flow_items(settings),
-             *tank_items(dev.petkit_id, active), *schedule_items(settings),
+             *tank_items(dev.petkit_id, active),
+             *schedule_items(settings, local_offset_hours(now)),
              alerts_item(active)]
     return {"device": _device_summary(dev), "checked_at": now,
             "all_ok": all(i["ok"] is True for i in items), "items": items}
