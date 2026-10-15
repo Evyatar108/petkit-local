@@ -15,11 +15,12 @@ import json
 import time
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import and_, delete, or_, select, update
+from sqlalchemy import REAL, ColumnElement, and_, case, cast, delete, func, or_, select, update
 
 from petkit_local.events import codes
 from petkit_local.events.models import Event, Media
 from petkit_local.fountain_app.models import FountainAlert, FountainBase, VisitLabel
+from petkit_local.fountain_app.visits import reported_start
 
 if TYPE_CHECKING:
     from petkit_local.events.store import EventStore
@@ -145,21 +146,21 @@ async def clear_alert(store: EventStore, alert_id: int, now: float) -> None:
 
 # --- upstream events, read for visits and alerts ------------------------------
 
-#: Rows one window read may return. A busy day is a few dozen visits of a few
-#: rows each; the cap only stops a runaway device from stalling the panel.
-ROW_LIMIT = 20000
 #: `IN (...)` lists are split to stay under SQLite's bound-variable limit.
 _IN_CHUNK = 400
 VISIT_KINDS = (codes.KIND_PET, codes.KIND_DRINKING)
-#: How long after the span a drinking report is still read, for a drink-over
-#: whose reported `event_start` lies inside the span. With no drink-start row
-#: that late report is the episode's only row. Drinks last minutes; the slack
-#: also covers a report the device sent late.
-DRINK_REPORT_LAG_SEC = 6 * 3600
+#: How far the device clock may run ahead of ours. A row reports a start
+#: before it arrives, however late it arrives, so rows that arrived more than
+#: this before a span cannot start in it; the bound keeps the read on the
+#: `(device_id, ts)` index instead of decoding the device's whole history.
+DEVICE_CLOCK_AHEAD_SEC = 86400
+#: Content keys a visit row may report its episode's start under; the exact
+#: rule per row is `visits.reported_start`.
+_START_KEYS = ("event_start", "start_time", "mark")
 
 
-async def _linked_rows(store: EventStore, device_id: int,
-                       keys: list[str]) -> list[dict[str, Any]]:
+async def linked_rows(store: EventStore, device_id: int,
+                      keys: list[str]) -> list[dict[str, Any]]:
     """Visit-kind rows whose `related_event` or `parent_event` is in `keys`,
     whenever they arrived, each carrying its `"media"` as `query_timeline` does."""
     rows: list[dict[str, Any]] = []
@@ -183,33 +184,47 @@ async def _linked_rows(store: EventStore, device_id: int,
     return rows
 
 
+def _may_start_in(lo: float, hi: float) -> ColumnElement[bool]:
+    """SQL prefilter: rows that may report a start in `[lo, hi)`.
+
+    A superset of what `visits.reported_start` keeps: arrival time or any
+    start key in range, plus content SQLite cannot parse (the device's
+    bare-token JSON, which Python repairs and SQL cannot), left for Python.
+    """
+    content = Event.content_json
+    valid = func.json_valid(content) == 1
+
+    def reported(key: str) -> ColumnElement[Any]:
+        return cast(case((valid, func.json_extract(content, f"$.{key}"))), REAL)
+
+    in_range = [and_(col >= lo, col < hi) for col in
+                [Event.ts] + [reported(k) for k in _START_KEYS]]
+    return or_(*in_range, and_(content.is_not(None), func.json_valid(content) == 0))
+
+
 async def visit_rows(store: EventStore, device_id: int, start_ts: float, end_ts: float,
                      window_sec: float) -> list[dict[str, Any]]:
     """The rows of every visit that can start in `[start_ts, end_ts)`, episodes whole.
 
-    Rows that arrived within `window_sec` of the span find the visits: the
-    widening lets a drink join an appearance across the boundary. Drinking
-    rows are read `DRINK_REPORT_LAG_SEC` further on, because a drink-over
-    files by the start it reports, not by when it arrived. Every episode
-    those rows belong to is then read whole by `related_event` and
-    `parent_event`, so a drink that ends long after midnight keeps its
-    drink-over row and its duration. The extra rows only add drinks the
-    span would otherwise miss; the caller still keeps a visit only if it
-    starts in the span, and the neighbouring day computes the same start
-    from the same whole episodes, so no visit is listed on two days.
+    Episodes are found by the start they REPORT (`visits.reported_start`),
+    not by when their rows arrived: a drink-over with no drink-start is the
+    episode's only row, and the device may deliver it hours late (the PC is
+    often off overnight). The span is widened by `window_sec` so a drink can
+    join an appearance across the boundary. Every episode found is then read
+    whole by `related_event` and `parent_event`, so a drink that ends after
+    midnight keeps its drink-over and its duration. The caller keeps a visit
+    only if it starts in the span, and each day computes the same start from
+    the same whole episodes, so no visit is listed on two days.
     """
-    rows: list[dict[str, Any]] = []
-    for kind in VISIT_KINDS:
-        lag = DRINK_REPORT_LAG_SEC if kind == codes.KIND_DRINKING else 0
-        rows += await store.query_timeline(
-            device_id=device_id, start_ts=start_ts - window_sec,
-            end_ts=end_ts + window_sec + lag, event_kind=kind, limit=ROW_LIMIT)
-    keys = sorted({k for r in rows for k in (r.get("related_event"), r.get("parent_event"))
-                   if k})
-    seen = {r["id"] for r in rows}
-    rows += [r for r in await _linked_rows(store, device_id, keys) if r["id"] not in seen]
-    return rows
-
+    lo, hi = start_ts - window_sec, end_ts + window_sec
+    async with store._read() as session:
+        found = await session.scalars(select(Event).where(
+            Event.device_id == device_id, Event.event_kind.in_(VISIT_KINDS),
+            Event.ts >= lo - DEVICE_CLOCK_AHEAD_SEC, _may_start_in(lo, hi)))
+        seeds = [e.as_dict() for e in found]
+    keys = sorted({k for r in seeds if lo <= reported_start(r) < hi
+                   for k in (r.get("related_event"), r.get("parent_event")) if k})
+    return await linked_rows(store, device_id, keys)
 
 async def error_rows(store: EventStore, device_id: int, before: tuple[float, int] | None,
                      limit: int) -> list[dict[str, Any]]:

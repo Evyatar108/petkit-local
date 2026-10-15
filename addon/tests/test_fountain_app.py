@@ -6,6 +6,7 @@ it through `parent_event`, and drinking `5`/`6` sharing a different
 `related_event` with `event_start`/`event_end` on the drink-over.
 """
 import json
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -120,6 +121,22 @@ def test_detection_without_our_pet_leaves_no_guess_and_non_visit_rows_are_ignore
     assert visit["device_guess"] is None
     assert visit["event_ids"] == [10, 11]
 
+
+def test_a_month_of_visits_builds_quickly():
+    """Review: 30 days at 50 visits a day took 4.5 s, blocking the event loop."""
+    t0, gap = 1_792_036_551.0, 30 * 86400 / 1500
+    rows = []
+    for n in range(1500):
+        t = t0 + n * gap
+        rows += _appearance(t, rel=f"A{n}") + _drink(t + 60, rel=f"B{n}", end=t + 90,
+                                                      first_id=100 + 2 * n)
+    assert len(rows) == 6000
+    began = time.perf_counter()
+    visits = build_visits(rows)
+    elapsed = time.perf_counter() - began
+    assert len(visits) == 1500 and all(v["has_appearance"] and v["has_drinking"]
+                                       for v in visits)
+    assert elapsed < 0.5, f"build_visits took {elapsed:.2f} s"
 
 # --- stats (pure) ----------------------------------------------------------
 
@@ -609,24 +626,32 @@ async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
         await store2.close()
 
 
-@pytest.mark.parametrize(("with_appearance", "with_start"), [
-    (True, True), (True, False), (False, False)],
-    ids=["appearance-and-drink-start", "no-drink-start", "drink-over-alone"])
+@pytest.mark.parametrize(("with_appearance", "with_start", "late"), [
+    (True, True, None), (True, False, None), (False, False, None),
+    (True, False, "drink"), (False, False, "drink"), (True, True, "all")],
+    ids=["appearance-and-drink-start", "no-drink-start", "drink-over-alone",
+         "no-drink-start-recorded-7h-late", "drink-over-alone-recorded-7h-late",
+         "everything-recorded-7h-late"])
 async def test_a_drink_that_ends_after_midnight_keeps_its_duration(
-        tmp_path, with_appearance, with_start):
+        tmp_path, with_appearance, with_start, late):
     """Review repro: appearance 23:58, drink 23:59:30 to 00:10 the next day.
 
-    The drink-over arrives at 00:10, long after the visit window, and without
-    a drink-start it is the episode's only row; it files by the start it reports.
+    The drink-over arrives at 00:10, or (`late`) at 07:00 when the PC was off
+    overnight. Without a drink-start it is the episode's only row; every
+    episode files by the start it reports, however late it was recorded.
     """
     app, _reg, store, pets = _panel(tmp_path)
     archie = await pets.create("Archie")
     t0 = datetime(2026, 10, 14, 23, 58).timestamp()
     drink = datetime(2026, 10, 14, 23, 59, 30).timestamp()
     over = datetime(2026, 10, 15, 0, 10).timestamp()
-    rows = _drink(drink, end=over, with_start=with_start)
+    recorded = datetime(2026, 10, 15, 7, 0).timestamp()
+    rows = _drink(drink, end=over, with_start=with_start,
+                  arrival_end=recorded if late else None)
     if with_appearance:
         rows = _appearance(t0, pet_id=archie["id"]) + rows
+    if late == "all":
+        rows = [{**r, "ts": recorded + i} for i, r in enumerate(rows)]
     await _seed(store, rows)
     c = await _client(app)
     try:

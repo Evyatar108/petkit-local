@@ -48,11 +48,16 @@ def _ready(media: list[dict[str, Any]], categories: tuple[str, ...]) -> list[str
 
 
 async def _visit_for(store, device_id: int, visit_key: str) -> dict[str, Any] | None:
-    """The visit anchored at `visit_key`, rebuilt from its stored events."""
-    anchor = await store.event_by_related(visit_key)
-    if anchor is None or anchor.get("device_id") != device_id or anchor.get("ts") is None:
+    """The visit anchored at `visit_key`, rebuilt from its stored events.
+
+    Looked up around the start the anchor reports, not when it arrived, as
+    the day view does (see `db.visit_rows`).
+    """
+    own = await db.linked_rows(store, device_id, [visit_key])
+    anchor = next((v for v in build_visits(own) if v["visit_key"] == visit_key), None)
+    if anchor is None:
         return None
-    ts = float(anchor["ts"])
+    ts = anchor["start_ts"]
     rows = await db.visit_rows(store, device_id, ts - VISIT_WINDOW_SEC, ts + VISIT_WINDOW_SEC,
                                VISIT_WINDOW_SEC)
     return next((v for v in build_visits(rows) if v["visit_key"] == visit_key), None)

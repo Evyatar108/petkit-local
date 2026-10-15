@@ -1,7 +1,7 @@
 """Visits: one cat at the fountain, built from stored W7H event rows.
 
-Pure functions, no I/O. The input is what `EventStore.query_timeline` returns
-(each row already carrying its `"media"` list); the output is plain dicts the
+Pure functions, no I/O. The input is stored event rows as `db.visit_rows` reads
+them (each already carrying its `"media"` list); the output is plain dicts the
 API decorates with labels and media URLs.
 
 A visit joins two device episodes that share nothing on the wire:
@@ -21,7 +21,9 @@ because HTTP codes are per device category.
 """
 from __future__ import annotations
 
+from bisect import bisect_right
 from dataclasses import dataclass, field
+from functools import cached_property
 from typing import Any
 
 from petkit_local.events import codes
@@ -63,6 +65,28 @@ def _epoch(value: Any) -> float | None:
     return v if v is not None and v > 0 else None
 
 
+def reported_start(row: dict[str, Any]) -> float:
+    """When this row says its episode began, else when the row arrived.
+
+    The per-row half of `_Episode.start`: whichever row sets an episode's
+    start reports that same time here, so a store read filtered on this
+    finds every episode that starts in its span, however late it arrived.
+    """
+    part = classify(row)
+    if part == APPEARANCE:
+        keys: tuple[str, ...] = ("start_time", "mark")
+    elif part in (DRINK_START, DRINK_OVER):
+        keys = ("event_start", "start_time")
+    else:
+        keys = ()
+    content = content_of_row(row) if keys else {}
+    for key in keys:
+        t = _epoch(content.get(key))
+        if t is not None:
+            return t
+    return float(row.get("ts") or 0)
+
+
 @dataclass
 class _Episode:
     """One device episode: every row sharing a `related_event`."""
@@ -84,9 +108,12 @@ class _Episode:
                 return list(r["media"])
         return []
 
-    @property
+    @cached_property
     def start(self) -> float:
-        """When the episode began, in the device's own clock where it said."""
+        """When the episode began, in the device's own clock where it said.
+
+        Cached: read only once `_episodes` has added every row.
+        """
         if self.kind == APPEARANCE:
             row = self.first(APPEARANCE) or self.rows[0]
             content = content_of_row(row)
@@ -222,20 +249,16 @@ def build_visits(rows: list[dict[str, Any]],
             still joins it.
     """
     appearances, drinking = _episodes(rows)
+    starts = [a.start for a in appearances]  # ascending: `_episodes` sorts by start
     attached: dict[str, list[_Episode]] = {a.related_event: [] for a in appearances}
     loose: list[_Episode] = []
     for drink in drinking:
-        start = drink.start
-        owner = None
-        for a in appearances:
-            if a.start > start:
-                break
-            if start - a.start <= window_sec:
-                owner = a  # keeps the LATEST qualifying appearance
-        if owner is None:
-            loose.append(drink)
+        # The LATEST appearance that started at or before the drink, if in the window.
+        i = bisect_right(starts, drink.start) - 1
+        if i >= 0 and drink.start - starts[i] <= window_sec:
+            attached[appearances[i].related_event].append(drink)
         else:
-            attached[owner.related_event].append(drink)
+            loose.append(drink)
 
     visits = [_visit(a, attached[a.related_event]) for a in appearances]
     visits += [_visit(None, [d]) for d in loose]
