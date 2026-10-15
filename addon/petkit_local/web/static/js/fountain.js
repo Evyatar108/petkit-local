@@ -57,29 +57,39 @@ function labelChips(v, pets) {
 
 // One block per device episode: an appearance and a drinking episode are
 // filmed separately, so a merged visit has two of each video.
+//
+// The full recording plays inline because it is the only real-time video.
+// The fountain's highlight clip runs at about 2x (8 s of visit in 4 s of
+// video, measured on a W7H), so it is offered as a labelled quick preview
+// instead, and only plays inline while the full recording is still missing.
 function episodeHtml(e) {
   const m = e.media || {};
   const what = e.kind === 'appearance' ? 'Appeared' : 'Drinking';
+  const inlineUrl = m.playback_url || m.highlight_url;
+  const poster = m.snapshot_url ? ` poster="${esc(mediaUrl(m.snapshot_url))}"` : '';
   let body = '';
-  if (m.highlight_url) {
-    body += `<video class="fx-clip" controls preload="none" playsinline src="${esc(mediaUrl(m.highlight_url))}"${
-      m.snapshot_url ? ` poster="${esc(mediaUrl(m.snapshot_url))}"` : ''
-    }></video>`;
+  if (inlineUrl) {
+    body += `<video class="fx-clip" controls preload="none" playsinline src="${esc(mediaUrl(inlineUrl))}"${poster}></video>`;
   } else if (m.snapshot_url) {
     body += `<img class="fx-clip hide-on-error" src="${esc(mediaUrl(m.snapshot_url))}" alt="">`;
   }
-  let full = '';
-  if (m.playback_url) {
-    full = `<button class="act mini-ex" data-action="open-video" data-media="${esc(
-      JSON.stringify([['Full recording', m.playback_url]]),
-    )}" data-pending="0">▶ Full recording</button>`;
-  } else if (m.video_pending) {
-    full = '<span class="pill">Full recording processing…</span>';
+  const foot = [];
+  if (m.playback_url && m.highlight_url) {
+    foot.push(
+      `<button class="act mini-ex" data-action="open-video" data-media="${esc(
+        JSON.stringify([['Quick preview (2×)', m.highlight_url]]),
+      )}" data-pending="0">▶ Quick preview (2×)</button>`,
+    );
+  } else if (!m.playback_url && m.highlight_url) {
+    foot.push('<span class="pill">Quick preview, about 2× speed</span>');
+  }
+  if (!m.playback_url && m.video_pending) {
+    foot.push('<span class="pill">Full recording processing…</span>');
   }
   return `<div class="fx-ep">
     <div class="mut fx-ep-head">${esc(what)} ${esc(hhmm(e.start_ts))}</div>
     ${body || '<div class="mut">No video.</div>'}
-    ${full ? `<div class="fx-ep-foot">${full}</div>` : ''}
+    ${foot.length ? `<div class="fx-ep-foot">${foot.join(' ')}</div>` : ''}
   </div>`;
 }
 

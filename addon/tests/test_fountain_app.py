@@ -349,12 +349,14 @@ async def test_the_fountain_tab_is_wired_into_the_panel(tmp_path):
 def test_the_fountain_tab_plays_clips_inline_and_labels_from_the_registry():
     from petkit_local.web import panel as panel_mod
 
-    js = (panel_mod.STATIC_DIR / "js" / "fountain.js").read_text()
-    # The highlight clip plays in the card, the snapshot as its poster.
+    js = (panel_mod.STATIC_DIR / "js" / "fountain.js").read_text(encoding="utf-8")
+    # The real-time full recording plays in the card, the snapshot as its
+    # poster; the ~2x highlight is a labelled quick preview.
     assert '<video class="fx-clip" controls preload="none"' in js
+    assert "const inlineUrl = m.playback_url || m.highlight_url;" in js
     assert "m.snapshot_url ? ` poster=" in js
-    # The full recording opens in the shared player, or says it is processing.
-    assert 'data-action="open-video"' in js and "Full recording processing" in js
+    assert 'data-action="open-video"' in js and "Quick preview (2×)" in js
+    assert "Full recording processing" in js
     # Cats come from the API's pet list; no cat is named in the source.
     for name in ("Archie", "Holly"):
         assert name not in js
