@@ -129,6 +129,11 @@ def _decide(row: dict[str, Any], decided: dict[str, dict[str, Any] | None]) -> N
             decided[flag] = None
 
 
+def tank_subject(device_id: int, flag: str) -> str:
+    """The `fountain_alerts.subject` of one fountain's tank alert."""
+    return f"{device_id}:{flag}"
+
+
 def tank_transitions(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
     """The latest transition of each tank flag among `rows` (any order).
 
@@ -170,10 +175,10 @@ async def _tank_alerts(store, device_id: int
         if row is None:
             continue
         label = codes.FOUNTAIN_W7H_ERROR_FLAGS.get(flag, flag)
-        wanted[f"{device_id}:{flag}"] = (KIND_TANK, {
+        wanted[tank_subject(device_id, flag)] = (KIND_TANK, {
             "device_id": device_id, "flag": flag, "since_ts": row.get("ts"),
             "message": f"{label} (fountain #{device_id})"})
-    unknown = {f"{device_id}:{flag}" for flag in TANK_FLAGS if flag not in decided}
+    unknown = {tank_subject(device_id, flag) for flag in TANK_FLAGS if flag not in decided}
     return wanted, unknown
 
 async def _attributed_drinkers(store, device_ids: list[int], start: float,

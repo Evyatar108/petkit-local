@@ -668,3 +668,168 @@ async def test_a_drink_that_ends_after_midnight_keeps_its_duration(
     finally:
         await c.close()
         await store.close()
+
+# --- status -------------------------------------------------------------------
+
+
+GOOD_SETTINGS = {"fountainMode": 1, "addWaterSwitch": 1,
+                 "autoWaterChange": 1, "waterChangeCycle": 3, "waterChangeTime": 29700,
+                 "autoFlush": 1, "flushCycle": 1, "flushTime": 46800}
+
+
+def _fine_fountain(reg, last_contact=None):
+    dev = reg.get(FOUNTAIN)
+    dev.config["settings"] = dict(GOOD_SETTINGS)
+    dev.last_mqtt = time.time() if last_contact is None else last_contact
+    return dev
+
+
+async def _status(app, query=""):
+    c = await _client(app)
+    try:
+        r = await c.get(f"/api/fountain/status{query}")
+        return r.status, await r.json()
+    finally:
+        await c.close()
+
+
+def _items(body):
+    return {i["key"]: i for i in body["items"]}
+
+
+async def test_status_of_a_fountain_where_everything_is_fine(tmp_path):
+    app, reg, store, _pets = _panel(tmp_path)
+    _fine_fountain(reg)
+    try:
+        status, body = await _status(app, f"?device={FOUNTAIN}")
+    finally:
+        await store.close()
+    assert status == 200
+    assert body["all_ok"] is True
+    assert body["device"]["id"] == FOUNTAIN
+    items = _items(body)
+    assert list(items) == ["online", "flow_mode", "auto_refill", "clean_tank", "waste_tank",
+                           "water_change", "flush", "alerts"]
+    assert all(set(i) == {"key", "label", "value", "ok", "detail"} for i in body["items"])
+    assert (items["online"]["value"], items["online"]["ok"]) == ("Online", True)
+    assert items["online"]["detail"]["last_seen_ts"] == reg.get(FOUNTAIN).last_mqtt
+    assert items["flow_mode"]["value"] == "Continuous"
+    assert items["auto_refill"]["value"] == "On"
+    assert items["clean_tank"]["value"] == items["waste_tank"]["value"] == "OK"
+    assert items["water_change"]["value"] == "Every 3 days at 08:15"
+    assert items["water_change"]["detail"] == {"enabled": True, "cycle_days": 3,
+                                               "time": "08:15"}
+    assert items["flush"]["value"] == "Every day at 13:00"
+    assert (items["alerts"]["value"], items["alerts"]["detail"]) == ("None", {"count": 0})
+
+
+async def test_status_reports_a_full_waste_tank_from_its_alert(tmp_path):
+    from petkit_local.fountain_app import alerts, db
+    from petkit_local.fountain_app.state import state_of
+
+    app, reg, store, _pets = _panel(tmp_path)
+    _fine_fountain(reg)
+    await state_of(app).tables.ensure(store)
+    await db.raise_alert(store, alerts.KIND_TANK, alerts.tank_subject(FOUNTAIN, "tankDF"),
+                         {"device_id": FOUNTAIN, "flag": "tankDF", "since_ts": 1234.0,
+                          "message": "Waste tank full"}, time.time())
+    # Another fountain's tank alert is not this one's.
+    await db.raise_alert(store, alerts.KIND_TANK, alerts.tank_subject(99, "tankCL"),
+                         {"device_id": 99, "flag": "tankCL"}, time.time())
+    try:
+        status, body = await _status(app)
+    finally:
+        await store.close()
+    assert status == 200
+    items = _items(body)
+    assert (items["waste_tank"]["value"], items["waste_tank"]["ok"]) == ("Full", False)
+    assert items["waste_tank"]["detail"] == {"alert": "Waste tank full", "since_ts": 1234.0}
+    assert (items["clean_tank"]["value"], items["clean_tank"]["ok"]) == ("OK", True)
+    assert (items["alerts"]["value"], items["alerts"]["ok"]) == ("2", False)
+    assert body["all_ok"] is False
+
+
+async def test_status_of_a_stale_fountain_is_offline(tmp_path):
+    from petkit_local.fountain_app import status as status_mod
+
+    app, reg, store, _pets = _panel(tmp_path)
+    seen = time.time() - status_mod.OFFLINE_TIMEOUT_SEC - 60
+    _fine_fountain(reg, last_contact=seen)
+    try:
+        status, body = await _status(app)
+    finally:
+        await store.close()
+    online = _items(body)["online"]
+    assert (online["value"], online["ok"]) == ("Offline", False)
+    assert online["detail"]["last_seen_ts"] == seen
+    assert body["all_ok"] is False
+
+
+async def test_status_without_an_event_store_leaves_tanks_and_alerts_unknown(tmp_path):
+    app, reg, _store, _pets = _panel(tmp_path, with_store=False)
+    _fine_fountain(reg)
+    status, body = await _status(app)
+    assert status == 200
+    items = _items(body)
+    for key in ("clean_tank", "waste_tank", "alerts"):
+        assert (items[key]["value"], items[key]["ok"]) == ("Unknown", None), key
+    assert items["online"]["ok"] is True and items["flush"]["ok"] is True
+    assert body["all_ok"] is False
+
+
+async def test_status_of_an_unknown_or_other_device_is_refused(tmp_path):
+    app, _reg, store, _pets = _panel(tmp_path)
+    try:
+        assert (await _status(app, "?device=42"))[0] == 404
+        assert (await _status(app, "?device=x"))[0] == 400
+    finally:
+        await store.close()
+    app, _reg, store, _pets = _panel(tmp_path, device_type="t5")
+    try:
+        assert (await _status(app, f"?device={FOUNTAIN}"))[0] == 400
+    finally:
+        await store.close()
+
+
+@pytest.mark.parametrize("settings", [
+    None, {}, "garbage",
+    {"fountainMode": "x", "addWaterSwitch": 7, "autoWaterChange": None,
+     "autoFlush": [1], "flushCycle": 1, "flushTime": 46800},
+    {"fountainMode": 9, "addWaterSwitch": "on", "autoWaterChange": 1, "waterChangeCycle": 0,
+     "waterChangeTime": 30000, "autoFlush": 1, "flushCycle": 2, "flushTime": 90000},
+], ids=["absent", "empty", "not-a-dict", "bad-values", "out-of-range"])
+async def test_status_with_missing_settings_reports_unknown_items(tmp_path, settings):
+    app, reg, store, _pets = _panel(tmp_path)
+    dev = reg.get(FOUNTAIN)
+    # Registration seeds the fountain defaults; "absent" removes them.
+    dev.config.pop("settings", None)
+    if settings is not None:
+        dev.config["settings"] = settings
+    try:
+        status, body = await _status(app)
+    finally:
+        await store.close()
+    assert status == 200
+    items = _items(body)
+    for key in ("online", "flow_mode", "auto_refill", "water_change", "flush"):
+        assert (items[key]["value"] in ("Unknown", "Never seen"), items[key]["ok"]) == (
+            True, None), key
+    assert items["online"]["detail"]["last_seen_ts"] is None
+    assert items["clean_tank"]["ok"] is True
+    assert body["all_ok"] is False
+
+
+async def test_status_reports_switched_off_flow_and_refill_but_not_schedules(tmp_path):
+    app, reg, store, _pets = _panel(tmp_path)
+    dev = _fine_fountain(reg)
+    dev.config["settings"].update(fountainMode=0, addWaterSwitch="0", autoWaterChange=0,
+                                  autoFlush=0)
+    try:
+        _status_code, body = await _status(app)
+    finally:
+        await store.close()
+    items = _items(body)
+    assert (items["flow_mode"]["value"], items["flow_mode"]["ok"]) == ("Off", False)
+    assert (items["auto_refill"]["value"], items["auto_refill"]["ok"]) == ("Off", False)
+    assert (items["water_change"]["value"], items["water_change"]["ok"]) == ("Off", True)
+    assert (items["flush"]["value"], items["flush"]["ok"]) == ("Off", True)

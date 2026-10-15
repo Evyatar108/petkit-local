@@ -1,4 +1,5 @@
-"""The fountain app for a W7H: visits, labels, stats, dataset export, alerts.
+"""The fountain app for a W7H: visits, labels, stats, dataset export, alerts,
+and a status summary.
 
 Self-contained on purpose. Upstream reaches this package through one call,
 `register(app)` at the end of `web/panel.py::create_panel_app`; everything
@@ -22,6 +23,7 @@ from petkit_local.fountain_app.api import (
     api_fountain_export, api_fountain_label, api_fountain_stats, api_fountain_visits,
 )
 from petkit_local.fountain_app.state import FOUNTAIN_APP, FountainState, state_of
+from petkit_local.fountain_app.status import api_fountain_status
 
 log = logging.getLogger(__name__)
 
@@ -64,5 +66,6 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/fountain/alerts", api_fountain_alerts)
     app.router.add_get("/api/fountain/alert-settings", api_fountain_alert_settings)
     app.router.add_post("/api/fountain/alert-settings", api_fountain_alert_settings)
+    app.router.add_get("/api/fountain/status", api_fountain_status)
     app.on_startup.append(_create_tables)
     app.on_startup.append(_start_alerts)
