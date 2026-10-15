@@ -1,6 +1,7 @@
 """What the fountain app keeps on the panel application between requests."""
 from __future__ import annotations
 
+import asyncio
 from dataclasses import dataclass, field
 
 from aiohttp import web
@@ -17,6 +18,8 @@ class FountainState:
     """Per-application state that outlives one request."""
 
     tables: TableGuard = field(default_factory=TableGuard)
+    #: Held while a dataset export runs; a second one is refused, not queued.
+    export_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
 
 
 def state_of(app: web.Application) -> FountainState:

@@ -1,4 +1,4 @@
-"""Request handlers for `/api/fountain/`: visits, their labels, and stats.
+"""Request handlers for `/api/fountain/`: visits, their labels, stats, export.
 
 Every endpoint is for a W7H fountain (`codes.FOUNTAIN_NEXT_GEN`); any other
 device is refused with 400, an unknown one with 404. Without an event store
@@ -13,6 +13,7 @@ from aiohttp import web
 
 from petkit_local.events import codes
 from petkit_local.fountain_app import db, stats
+from petkit_local.fountain_app.export import export_dataset
 from petkit_local.fountain_app.models import SPECIAL_LABELS
 from petkit_local.fountain_app.state import state_of
 from petkit_local.fountain_app.visits import VISIT_WINDOW_SEC, build_visits
@@ -221,3 +222,27 @@ async def api_fountain_stats(request: web.Request) -> web.Response:
         "tz_offset": int(round(local_offset_hours(spans[-1][1]) * 3600)),
         **result,
     })
+
+
+async def api_fountain_export(request: web.Request) -> web.Response:
+    """Write a training dataset from every labeled visit of one fountain.
+
+    `POST /api/fountain/export?device=` (device defaults to the first W7H).
+    Writes `{data_dir}/datasets/<timestamp>/` (see `export.py`) and answers
+    `{ok, path, visits, images, by_label, missing, no_media, ffmpeg}`. A
+    second export while one runs is refused with 409.
+    """
+    store = _store(request)
+    dev = _device(request.app, request.query.get("device"))
+    data_dir = request.app["cfg"].get("data_dir")
+    if not data_dir:
+        raise _refuse(web.HTTPBadRequest, "no data directory configured")
+    state = state_of(request.app)
+    if state.export_lock.locked():
+        raise _refuse(web.HTTPConflict, "an export is already running")
+    async with state.export_lock:
+        await state.tables.ensure(store)
+        pets = await _pets_by_id(request)
+        result = await export_dataset(store, dev.petkit_id, data_dir,
+                                      {pid: p.get("name") for pid, p in pets.items()})
+    return web.json_response({"ok": True, **result})

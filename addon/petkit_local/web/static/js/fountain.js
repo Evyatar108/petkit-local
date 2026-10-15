@@ -120,6 +120,7 @@ function controlsHtml(data) {
       }
       <span class="grow"></span>
       <button class="act" data-action="fx-refresh">Refresh</button>
+      <button class="act" data-action="fx-export" title="Write every labeled visit's images to a dataset folder on the server">Export dataset</button>
     </div>
   </div>`;
 }
@@ -252,6 +253,23 @@ onAction('fx-label', el => setLabel(el.dataset.visit, el.dataset.label));
 onAction('fx-unlabel', el => setLabel(el.dataset.visit, null));
 onAction('fx-shift', el => shiftDay(Number(el.dataset.n)));
 onAction('fx-refresh', () => loadFountain());
+onAction('fx-export', async el => {
+  el.disabled = true;
+  const label = el.textContent;
+  el.textContent = 'Exporting…';
+  const q = FX_DEVICE ? '?device=' + encodeURIComponent(FX_DEVICE) : '';
+  const r = await api('fountain/export' + q, { method: 'POST' });
+  el.disabled = false;
+  el.textContent = label;
+  if (r.error) {
+    toast('Export failed: ' + r.error);
+    return;
+  }
+  toast(
+    `Exported ${r.images} images from ${r.visits} visits to ${r.path}` +
+      (r.ffmpeg ? '' : ' (snapshots only: ffmpeg is missing)'),
+  );
+});
 onAction('fx-days', el => {
   FX_DAYS = Number(el.dataset.n);
   loadStats();

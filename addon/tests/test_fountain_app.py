@@ -340,3 +340,103 @@ def test_the_fountain_tab_plays_clips_inline_and_labels_from_the_registry():
     for name in ("Archie", "Holly"):
         assert name not in js
     assert "['unknown', 'Unknown']" in js and "['not_a_cat', 'Not a cat']" in js
+
+# --- dataset export ---------------------------------------------------------
+
+
+async def _seed_export(tmp_path, store, pets):
+    """Two labeled visits (one with media), one unlabeled, one pruned label."""
+    from petkit_local.fountain_app import db
+
+    archie = await pets.create("Archie")
+    t0 = _noon()
+    await _seed(store, _appearance(t0, pet_id=archie["id"]) + _drink(t0 + 97, end=t0 + 171)
+                + _drink(t0 + 3600, rel="C", end=t0 + 3640, first_id=30)
+                + _drink(t0 + 7200, rel="U", end=t0 + 7230, first_id=40))
+    snap = tmp_path / "media" / "Image" / "a.jpg"
+    snap.parent.mkdir(parents=True)
+    snap.write_bytes(b"\xff\xd8\xff\xe0" + b"A" * 60)
+    await store.upsert_media({"file_id": "img", "device_id": FOUNTAIN, "related_event": "A",
+                              "category": "eventImage", "status": "ready",
+                              "media_path": str(snap)})
+    await db.TableGuard().ensure(store)
+    await db.set_label(store, FOUNTAIN, "A", str(archie["id"]))
+    await db.set_label(store, FOUNTAIN, "C", "not_a_cat")
+    await db.set_label(store, FOUNTAIN, "gone", "unknown")
+    return archie
+
+
+async def test_export_writes_labeled_snapshots_and_a_csv(tmp_path, monkeypatch):
+    import csv
+
+    from petkit_local.fountain_app import export
+
+    monkeypatch.setattr(export, "have_ffmpeg", lambda: False)
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await _seed_export(tmp_path, store, pets)
+    c = await _client(app)
+    try:
+        r = await c.post("/api/fountain/export")
+        assert r.status == 200
+        body = await r.json()
+    finally:
+        await c.close()
+        await store.close()
+
+    out = Path(body["path"])
+    assert out.parent == tmp_path / "datasets" and out.is_dir()
+    assert not list(out.parent.glob("*.partial"))
+    assert (body["visits"], body["images"], body["ffmpeg"]) == (1, 1, False)
+    assert (body["missing"], body["no_media"]) == (1, 1)
+    assert body["by_label"] == {str(archie["id"]): 1}
+    image = out / "images" / str(archie["id"]) / "A_1.jpg"
+    assert image.read_bytes().startswith(b"\xff\xd8")
+    with open(out / "labels.csv", newline="") as fh:
+        rows = list(csv.DictReader(fh))
+    assert rows == [{"file": f"images/{archie['id']}/A_1.jpg", "label": str(archie["id"]),
+                     "label_name": "Archie", "device_guess": str(archie["id"]),
+                     "visit_time": rows[0]["visit_time"], "source": "snapshot:appearance"}]
+    assert not (out / ".frames").exists()
+
+
+async def test_export_pulls_frames_from_the_highlight_clip(tmp_path):
+    import shutil
+    import subprocess
+
+    import pytest
+
+    if shutil.which("ffmpeg") is None:
+        pytest.skip("ffmpeg not installed")
+    app, _reg, store, pets = _panel(tmp_path)
+    await _seed_export(tmp_path, store, pets)
+    clip = tmp_path / "media" / "Highlight" / "b.mp4"
+    clip.parent.mkdir(parents=True)
+    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
+                    "testsrc=duration=4:size=64x64:rate=5", str(clip)], check=True)
+    await store.upsert_media({"file_id": "hl", "device_id": FOUNTAIN, "related_event": "B",
+                              "category": "dynamicVideo", "status": "ready",
+                              "media_path": str(clip)})
+    c = await _client(app)
+    try:
+        body = await (await c.post(f"/api/fountain/export?device={FOUNTAIN}")).json()
+    finally:
+        await c.close()
+        await store.close()
+    assert body["ffmpeg"] is True
+    assert body["images"] == 4  # the snapshot plus three clip frames
+    names = sorted(p.name for p in Path(body["path"]).glob("images/*/*.jpg"))
+    assert names == ["A_1.jpg", "A_2.jpg", "A_3.jpg", "A_4.jpg"]
+
+
+async def test_a_second_export_while_one_runs_is_refused(tmp_path):
+    from petkit_local.fountain_app.state import state_of
+
+    app, _reg, store, _pets = _panel(tmp_path)
+    c = await _client(app)
+    try:
+        async with state_of(app).export_lock:
+            r = await c.post("/api/fountain/export")
+            assert r.status == 409
+    finally:
+        await c.close()
+        await store.close()
