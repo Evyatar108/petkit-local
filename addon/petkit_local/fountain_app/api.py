@@ -23,10 +23,6 @@ from petkit_local.utils.timeutil import local_day_bounds, local_offset_hours
 from petkit_local.web.api._common import _json_body, _pet_fields, _pets_by_id, _refuse
 from petkit_local.web.api.media import _session_media_urls
 
-#: Rows one visit query may read. A busy day is a few dozen visits of a few
-#: rows each; the cap only stops a runaway device from stalling the panel.
-ROW_LIMIT = 20000
-
 
 def is_fountain(device: Any) -> bool:
     """True if a registry device is a W7H fountain."""
@@ -75,14 +71,10 @@ async def visits_between(store, device_id: int, start_ts: float, end_ts: float,
                          window_sec: float = VISIT_WINDOW_SEC) -> list[dict[str, Any]]:
     """Visits of one fountain that START in `[start_ts, end_ts)`, newest first.
 
-    The read is widened by `window_sec` on both sides so a visit whose two
-    halves straddle a boundary is built whole and then filed by its start.
+    Filed by their start in local time, so a visit that runs past midnight
+    belongs to the day it began, complete (see `db.visit_rows`).
     """
-    rows: list[dict[str, Any]] = []
-    for kind in (codes.KIND_PET, codes.KIND_DRINKING):
-        rows += await store.query_timeline(
-            device_id=device_id, start_ts=start_ts - window_sec,
-            end_ts=end_ts + window_sec, event_kind=kind, limit=ROW_LIMIT)
+    rows = await db.visit_rows(store, device_id, start_ts, end_ts, window_sec)
     return [v for v in build_visits(rows, window_sec) if start_ts <= v["start_ts"] < end_ts]
 
 

@@ -1,5 +1,6 @@
 import { BASE } from './core.js';
 import { loadDevices, scheduleRefresh, scheduleDetail } from './devices.js';
+import { scheduleFountainAlerts } from './fountain.js';
 import { pushLog } from './log.js';
 import { loadPatchers } from './patchers.js';
 import { scheduleTimeline } from './timeline.js';
@@ -71,6 +72,7 @@ function connectWS() {
     // can render before the file exists, its <img> 404s, and nothing ever
     // retries (see the hide-on-error handling in mediaThumbs() below).
     if (e.kind === 'media' || e.kind === 'event') scheduleTimeline();
+    if (e.kind === 'fountain_alert') scheduleFountainAlerts();
   };
 }
 

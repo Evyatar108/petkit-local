@@ -316,7 +316,7 @@ async def test_the_fountain_tab_is_wired_into_the_panel(tmp_path):
         assert '<div id="fountainView">' in html
         r = await c.get(f"/asset/{panel_mod.ASSET_VERSION}/js/fountain.js")
         assert r.status == 200
-        assert "export { loadFountain }" in await r.text()
+        assert "export { loadFountain, scheduleFountainAlerts }" in await r.text()
     finally:
         await c.close()
 
@@ -518,7 +518,7 @@ async def test_tank_alerts_follow_error_start_and_error_over(tmp_path):
 
 
 def test_an_error_over_naming_nothing_clears_every_tank_flag():
-    from petkit_local.fountain_app.alerts import active_tank_flags
+    from petkit_local.fountain_app.alerts import tank_transitions
 
     def row(event_type, ts, content):
         return {"device_type": "w7h", "event_type": event_type, "ts": ts,
@@ -526,8 +526,58 @@ def test_an_error_over_naming_nothing_clears_every_tank_flag():
 
     rows = [row("error_start", 1, {"err": "tankCL,tankDF"}),
             row("error_over", 2, {})]
-    assert active_tank_flags(rows) == {}
-    assert set(active_tank_flags(rows[:1])) == {"tankCL", "tankDF"}
+    assert tank_transitions(rows) == {"tankCL": None, "tankDF": None}
+    assert set(tank_transitions(rows[:1])) == {"tankCL", "tankDF"}
+    assert tank_transitions([row("error_start", 1, {"err": "taryF"})]) == {}
+
+
+async def test_a_tank_alert_outlives_many_unrelated_faults(tmp_path, monkeypatch):
+    """Review repro: tankCL, then 201 taryF start/clear pairs, must stay raised."""
+    from petkit_local.events.normalize import from_mqtt
+    from petkit_local.fountain_app import alerts, db
+
+    monkeypatch.setattr(alerts, "TANK_SCAN_PAGE", 50)  # several pages, not one
+    app, reg, store, _pets = _panel(tmp_path)
+    dev = reg.get(FOUNTAIN)
+    t0 = 1_792_000_000.0
+
+    async def report(event_type, err, ts, eid):
+        row = from_mqtt(dev, event_type, {"event_id": eid, "content": json.dumps({"err": err})})
+        await store.upsert_event(row | {"ts": ts})
+
+    try:
+        await report("error_start", "tankCL", t0, "cl")
+        assert [a["subject"] for a in (await alerts.check_app(app, now=t0 + 1))["raised"]] == [
+            f"{FOUNTAIN}:tankCL"]
+        for i in range(201):
+            await report("error_start", "taryF", t0 + 10 + 2 * i, f"s{i}")
+            await report("error_over", "taryF", t0 + 11 + 2 * i, f"o{i}")
+        assert await alerts.check_app(app, now=t0 + 1000) == {"raised": [], "cleared": []}
+        assert [a["subject"] for a in await db.active_alerts(store)] == [f"{FOUNTAIN}:tankCL"]
+
+        await report("error_over", "tankCL", t0 + 2000, "clr")
+        step = await alerts.check_app(app, now=t0 + 2001)
+        assert [a["subject"] for a in step["cleared"]] == [f"{FOUNTAIN}:tankCL"]
+    finally:
+        await store.close()
+
+
+async def test_an_alert_whose_start_is_out_of_reach_is_not_cleared(tmp_path, monkeypatch):
+    from petkit_local.events.normalize import from_mqtt
+    from petkit_local.fountain_app import alerts, db
+
+    app, reg, store, _pets = _panel(tmp_path)
+    t0 = 1_792_000_000.0
+    row = from_mqtt(reg.get(FOUNTAIN), "error_start",
+                    {"event_id": "cl", "content": json.dumps({"err": "tankCL"})})
+    await store.upsert_event(row | {"ts": t0})
+    try:
+        await alerts.check_app(app, now=t0 + 1)
+        monkeypatch.setattr(alerts, "TANK_SCAN_MAX", 0)  # nothing read at all
+        assert await alerts.check_app(app, now=t0 + 2) == {"raised": [], "cleared": []}
+        assert [a["subject"] for a in await db.active_alerts(store)] == [f"{FOUNTAIN}:tankCL"]
+    finally:
+        await store.close()
 
 
 async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
@@ -556,3 +606,24 @@ async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
         await c.close()
         await store.close()
         await store2.close()
+
+async def test_a_drink_that_ends_after_midnight_keeps_its_duration(tmp_path):
+    """Review repro: appearance 23:58, drink 23:59:30 to 00:10 the next day."""
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    t0 = datetime(2026, 10, 14, 23, 58).timestamp()
+    drink = datetime(2026, 10, 14, 23, 59, 30).timestamp()
+    over = datetime(2026, 10, 15, 0, 10).timestamp()
+    await _seed(store, _appearance(t0, pet_id=archie["id"]) + _drink(drink, end=over))
+    c = await _client(app)
+    try:
+        day = await (await c.get("/api/fountain/visits?date=2026-10-14")).json()
+        [visit] = day["visits"]
+        assert visit["visit_key"] == "A" and visit["has_drinking"]
+        assert visit["duration_sec"] == 630
+        assert visit["drink_end_ts"] == over
+        after = await (await c.get("/api/fountain/visits?date=2026-10-15")).json()
+        assert after["visits"] == []
+    finally:
+        await c.close()
+        await store.close()

@@ -12,7 +12,9 @@ shows the active ones as a banner.
   install or a new fountain does not alert on every cat at once.
 * **Tanks**: the latest W7H `error_start` naming `tankCL` (clean tank low) or
   `tankDF` (waste tank full) with no later `error_over` for it
-  (`claim:tank-alerts-from-error-events`). The raw hall sensors are not read.
+  (`claim:tank-alerts-from-error-events`), however far back it lies. A tank
+  alert is cleared only by a reported clear, never because its start fell
+  out of the rows read. The raw hall sensors are not read.
 
 The threshold is kept in `{data_dir}/fountain_app.json`.
 """
@@ -45,8 +47,10 @@ NO_DRINK_HOURS_RANGE = (1.0, 168.0)
 LAST_DRINK_LOOKBACK_SEC = 7 * 86400
 #: How long a cleared alert stays in the `recent` list.
 RECENT_SEC = 7 * 86400
-#: Error rows read per fountain to find the tank state; the newest decide it.
-ERROR_ROWS = 200
+#: Error rows read per page, and at most per fountain and check, while
+#: looking back for each tank flag's latest start or clear.
+TANK_SCAN_PAGE = 500
+TANK_SCAN_MAX = 20000
 TANK_FLAGS = ("tankCL", "tankDF")
 SETTINGS_FILE = "fountain_app.json"
 HUB_KIND = "fountain_alert"
@@ -104,41 +108,73 @@ def _flag_names(row: dict[str, Any]) -> list[str]:
     return [part.strip() for part in str(err).split(",") if part.strip()]
 
 
-def active_tank_flags(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
-    """`flag -> error_start row` for each tank fault still open.
+def _decide(row: dict[str, Any], decided: dict[str, dict[str, Any] | None]) -> None:
+    """Record what `row` says about each tank flag not yet decided.
 
-    `rows` are error-kind events of one device, in any order. An
-    `error_over` naming a flag clears that flag; one naming nothing clears
-    every flag, since it can only mean the device reports no fault left.
+    Rows are fed newest first, so the first transition met for a flag is its
+    latest: an `error_start` naming it opens it (the row is kept), an
+    `error_over` naming it, or naming nothing at all, clears it (None).
     """
-    open_flags: dict[str, dict[str, Any]] = {}
-    for row in sorted(rows, key=lambda r: (r.get("ts") or 0, r.get("id") or 0)):
-        code = codes.lookup(row.get("event_type"), row.get("device_type"))
-        role = code.role if code else None
-        names = _flag_names(row)
-        if role == codes.ROLE_ERROR_START:
-            for name in names:
-                if name in TANK_FLAGS:
-                    open_flags[name] = row
-        elif role == codes.ROLE_ERROR_OVER:
-            if not names:
-                open_flags.clear()
-            for name in names:
-                open_flags.pop(name, None)
-    return open_flags
+    code = codes.lookup(row.get("event_type"), row.get("device_type"))
+    role = code.role if code else None
+    if role not in (codes.ROLE_ERROR_START, codes.ROLE_ERROR_OVER):
+        return
+    names = _flag_names(row)
+    for flag in TANK_FLAGS:
+        if flag in decided:
+            continue
+        if role == codes.ROLE_ERROR_START and flag in names:
+            decided[flag] = row
+        elif role == codes.ROLE_ERROR_OVER and (not names or flag in names):
+            decided[flag] = None
 
 
-async def _tank_alerts(store, device_id: int) -> dict[str, tuple[str, dict[str, Any]]]:
-    rows = await store.query_timeline(device_id=device_id, event_kind=codes.KIND_ERROR,
-                                      limit=ERROR_ROWS)
-    out: dict[str, tuple[str, dict[str, Any]]] = {}
-    for flag, row in active_tank_flags(rows).items():
+def tank_transitions(rows: list[dict[str, Any]]) -> dict[str, dict[str, Any] | None]:
+    """The latest transition of each tank flag among `rows` (any order).
+
+    `flag -> error_start row` if open, `flag -> None` if cleared; a flag the
+    rows say nothing about is absent, which means "unknown", never "clear".
+    """
+    decided: dict[str, dict[str, Any] | None] = {}
+    for row in sorted(rows, key=lambda r: (r.get("ts") or 0, r.get("id") or 0), reverse=True):
+        _decide(row, decided)
+        if len(decided) == len(TANK_FLAGS):
+            break
+    return decided
+
+
+async def _tank_alerts(store, device_id: int
+                       ) -> tuple[dict[str, tuple[str, dict[str, Any]]], set[str]]:
+    """`(wanted, unknown)`: the open tank alerts, and the subjects to leave as they are.
+
+    Pages back through the device's error history until every tank flag has
+    met its latest transition, however many unrelated faults came after it.
+    A flag still undecided when the history (or `TANK_SCAN_MAX`) runs out is
+    unknown: an alert already raised for it stays raised.
+    """
+    decided: dict[str, dict[str, Any] | None] = {}
+    before: tuple[float, int] | None = None
+    read = 0
+    while len(decided) < len(TANK_FLAGS) and read < TANK_SCAN_MAX:
+        page = await db.error_rows(store, device_id, before, TANK_SCAN_PAGE)
+        for row in page:
+            _decide(row, decided)
+            if len(decided) == len(TANK_FLAGS):
+                break
+        read += len(page)
+        if len(page) < TANK_SCAN_PAGE:
+            break
+        before = (page[-1]["ts"], page[-1]["id"])
+    wanted: dict[str, tuple[str, dict[str, Any]]] = {}
+    for flag, row in decided.items():
+        if row is None:
+            continue
         label = codes.FOUNTAIN_W7H_ERROR_FLAGS.get(flag, flag)
-        out[f"{device_id}:{flag}"] = (KIND_TANK, {
+        wanted[f"{device_id}:{flag}"] = (KIND_TANK, {
             "device_id": device_id, "flag": flag, "since_ts": row.get("ts"),
             "message": f"{label} (fountain #{device_id})"})
-    return out
-
+    unknown = {f"{device_id}:{flag}" for flag in TANK_FLAGS if flag not in decided}
+    return wanted, unknown
 
 async def _attributed_drinkers(store, device_ids: list[int], start: float,
                                end: float) -> list[tuple[float, str]]:
@@ -201,8 +237,11 @@ async def check(store, device_ids: list[int], pets: dict[int, str | None], hub,
     now = time.time() if now is None else now
     active = {a["subject"]: a for a in await db.active_alerts(store)}
     wanted: dict[str, tuple[str, dict[str, Any]]] = {}
+    unknown: set[str] = set()
     for did in device_ids:
-        wanted.update(await _tank_alerts(store, did))
+        tank_wanted, tank_unknown = await _tank_alerts(store, did)
+        wanted.update(tank_wanted)
+        unknown |= tank_unknown
     wanted.update(await _no_drink_alerts(store, device_ids, pets, no_drink_hours, now,
                                          set(active)))
 
@@ -215,7 +254,7 @@ async def check(store, device_ids: list[int], pets: dict[int, str | None], hub,
         if hub is not None:
             hub.publish(HUB_KIND, detail.get("device_id"), detail["message"], alert)
     for subject, alert in active.items():
-        if subject in wanted:
+        if subject in wanted or subject in unknown:
             continue
         await db.clear_alert(store, alert["id"], now)
         alert = {**alert, "cleared_at": now}

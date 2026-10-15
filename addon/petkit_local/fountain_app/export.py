@@ -26,7 +26,6 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from petkit_local.events import codes
 from petkit_local.fountain_app import db
 from petkit_local.fountain_app.visits import VISIT_WINDOW_SEC, build_visits
 from petkit_local.media.transcode import THUMB_TIMEOUT, have_ffmpeg, run_ffmpeg
@@ -54,11 +53,8 @@ async def _visit_for(store, device_id: int, visit_key: str) -> dict[str, Any] | 
     if anchor is None or anchor.get("device_id") != device_id or anchor.get("ts") is None:
         return None
     ts = float(anchor["ts"])
-    rows: list[dict[str, Any]] = []
-    for kind in (codes.KIND_PET, codes.KIND_DRINKING):
-        rows += await store.query_timeline(
-            device_id=device_id, start_ts=ts - 2 * VISIT_WINDOW_SEC,
-            end_ts=ts + 2 * VISIT_WINDOW_SEC, event_kind=kind, limit=2000)
+    rows = await db.visit_rows(store, device_id, ts - VISIT_WINDOW_SEC, ts + VISIT_WINDOW_SEC,
+                               VISIT_WINDOW_SEC)
     return next((v for v in build_visits(rows) if v["visit_key"] == visit_key), None)
 
 

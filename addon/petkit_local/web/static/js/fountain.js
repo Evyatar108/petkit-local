@@ -182,32 +182,72 @@ async function loadStats() {
 }
 
 // Active alerts as a banner, with the no-drink threshold beside them. The
-// server raises and clears them once a minute; this only reads.
-function alertsHtml(al) {
-  if (!al || al.error) return '<div class="fx-alerts"></div>';
+// server raises and clears them once a minute; this only reads, on tab load,
+// on each `fountain_alert` hub event (ws.js) and on a poll while visible.
+function alertItemsHtml(al) {
   const since = a => {
     const ts = a.kind === 'tank' ? a.detail.since_ts : a.detail.last_drink_ts;
     if (!ts) return '';
     const what = a.kind === 'tank' ? 'since' : 'last drank';
     return ` <span class="mut">(${what} ${esc(new Date(ts * 1000).toLocaleString())})</span>`;
   };
+  if (!al.active.length) return '<span class="mut">No active alerts.</span>';
   const items = al.active
     .map(a => `<li><b>${esc(a.detail.message || a.subject)}</b>${since(a)}</li>`)
     .join('');
+  return `<ul class="fx-alert-list">${items}</ul>`;
+}
+function alertsHtml(al) {
+  if (!al || al.error) return '<div class="fx-alerts"></div>';
   const hours = al.settings ? al.settings.no_drink_hours : 12;
   const setting = `<div class="row fx-alert-setting"><span class="mut">Alert when a cat has not drunk for</span>
     <input type="number" class="fx-hours" min="1" max="168" step="1" value="${esc(hours)}"> <span class="mut">hours</span>
     <button class="ghost act" data-action="fx-alert-save">Save</button></div>`;
-  return al.active.length
-    ? `<div class="card notice fx-alerts"><ul class="fx-alert-list">${items}</ul>${setting}</div>`
-    : `<div class="card fx-alerts"><span class="mut">No active alerts.</span>${setting}</div>`;
+  const cls = al.active.length ? 'card notice fx-alerts' : 'card fx-alerts';
+  return `<div class="${cls}"><div class="fx-alert-body">${alertItemsHtml(al)}</div>${setting}</div>`;
 }
 
+//: Bumped per request, so a slow answer never overwrites a newer one.
+let FX_ALERT_SEQ = 0;
 async function loadAlerts() {
+  const seq = ++FX_ALERT_SEQ;
   const al = await api('fountain/alerts');
+  if (seq !== FX_ALERT_SEQ) return;
   const el = document.querySelector('#fountainView .fx-alerts');
-  if (el) el.outerHTML = alertsHtml(al);
+  if (!el) return;
+  const body = el.querySelector('.fx-alert-body');
+  if (!body) {
+    el.outerHTML = alertsHtml(al);
+    return;
+  }
+  if (!al || al.error) return; // keep what is shown rather than blank it
+  // Only the list changes: the threshold field may hold an unsaved edit.
+  body.innerHTML = alertItemsHtml(al);
+  el.classList.toggle('notice', al.active.length > 0);
 }
+
+function fountainVisible() {
+  const tab = document.getElementById('tab-fountain');
+  return !!tab && !tab.classList.contains('hidden') && document.visibilityState === 'visible';
+}
+let FX_ALERT_TIMER = null;
+// Called by ws.js for each `fountain_alert` hub event (raised or cleared). A
+// burst of them costs one request; a hidden tab reloads on its next visit.
+function scheduleFountainAlerts() {
+  if (FX_ALERT_TIMER || !fountainVisible()) return;
+  FX_ALERT_TIMER = setTimeout(() => {
+    FX_ALERT_TIMER = null;
+    loadAlerts();
+  }, 300);
+}
+// The poll covers a hub event missed while the socket was reconnecting.
+const FX_ALERT_POLL_MS = 60000;
+setInterval(() => {
+  if (fountainVisible()) loadAlerts();
+}, FX_ALERT_POLL_MS);
+document.addEventListener('visibilitychange', () => {
+  if (fountainVisible()) loadAlerts();
+});
 
 async function loadFountain() {
   if (!FX_DATE) FX_DATE = todayLocal();
@@ -327,4 +367,4 @@ onChange('fx-device', el => {
   loadFountain();
 });
 
-export { loadFountain };
+export { loadFountain, scheduleFountainAlerts };
