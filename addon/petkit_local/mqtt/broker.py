@@ -187,6 +187,7 @@ async def start_broker(
     *,
     tls: bool = False,
     tls_port: int = 443,
+    tls_bind_host: str = "0.0.0.0",
     certfile: str = "",
     keyfile: str = "",
     strict_auth: bool = False,
@@ -201,7 +202,9 @@ async def start_broker(
 
     Args:
         port: Plain-TCP listener, used by the internal bridge.
-        tls_port/certfile/keyfile: Only consulted when `tls` is set; a missing
+        tls_port/tls_bind_host/certfile/keyfile: Only consulted when `tls` is
+            set. `tls_bind_host` is the device-facing address; the plain
+            listener stays on every interface for the bridge. A missing
             cert is generated. If it cannot be, the broker still starts without
             the TLS listener — a plain-HTTP device keeps working.
         strict_auth: Reject devices that fail signature validation. Off by
@@ -220,7 +223,7 @@ async def start_broker(
         key = keyfile or "/data/certs/broker.key"
         if ensure_self_signed(cert, key):
             listeners["tls"] = ListenerConfig(
-                type="tcp", bind=f"0.0.0.0:{tls_port}", max_connections=50,
+                type="tcp", bind=f"{tls_bind_host}:{tls_port}", max_connections=50,
                 ssl=True, certfile=cert, keyfile=key,
             )
             log.info("MQTT TLS listener enabled on port %d", tls_port)

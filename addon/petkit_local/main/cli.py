@@ -17,6 +17,9 @@ def _build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", default="config.json", help="Config file path")
     parser.add_argument("--port", type=int, default=None, help="HTTP port override")
     parser.add_argument("--mqtt-port", type=int, default=None, help="MQTT broker port")
+    parser.add_argument("--bind-host", default=None,
+                        help="Address for the device API, MQTT TLS, bucket and panel "
+                             "listeners (default 0.0.0.0)")
     parser.add_argument("--api-url", default=None, help="API URL the device sees")
     parser.add_argument("--data-dir", default=None, help="Data directory for persistence")
     parser.add_argument("--ha-mqtt-host", default=None, help="HA MQTT broker host")
@@ -68,6 +71,8 @@ def build_config(args: argparse.Namespace) -> Config:
             config.http_port = args.port
         if args.mqtt_port:
             config.mqtt_port = args.mqtt_port
+        if args.bind_host:
+            config.bind_host = args.bind_host
         if args.api_url:
             config.api_url = args.api_url
         if args.data_dir:

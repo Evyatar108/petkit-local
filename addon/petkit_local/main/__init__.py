@@ -64,4 +64,4 @@ def main() -> None:
              "(disabled)" if args.no_ha else "")
     log.info("Registered devices: %d", len(services.registry.all()))
 
-    web.run_app(app, host="0.0.0.0", port=config.http_port, print=None)
+    web.run_app(app, host=config.bind_host, port=config.http_port, print=None)

@@ -192,7 +192,7 @@ async def start_background(services: Services, app_instance: web.Application) ->
     panel["go2rtc"] = go2rtc
     runner = web.AppRunner(panel)
     await runner.setup()
-    await web.TCPSite(runner, "0.0.0.0", config.web_port).start()
+    await web.TCPSite(runner, config.bind_host, config.web_port).start()
     app_instance["panel_runner"] = runner
     # "(HA Ingress)" only when there IS a Supervisor to proxy it. Home
     # Assistant Container and Core have no add-on system, so this also runs
@@ -248,7 +248,7 @@ async def start_background(services: Services, app_instance: web.Application) ->
     except Exception as e:
         log.warning("Local bucket TLS failed (%s), falling back to plain HTTP", e)
 
-    await web.TCPSite(bucket_runner, "0.0.0.0", config.bucket_port,
+    await web.TCPSite(bucket_runner, config.bind_host, config.bucket_port,
                       ssl_context=bkt_ctx).start()
     if bkt_ctx is not None:
         log.info("Local bucket (HTTPS) on port %d -> %s", config.bucket_port, media_root)
@@ -287,6 +287,7 @@ async def start_background(services: Services, app_instance: web.Application) ->
         broker = await start_broker(
             config.mqtt_port, registry,
             tls=config.mqtt_tls, tls_port=config.mqtt_tls_port,
+            tls_bind_host=config.bind_host,
             certfile=cert_path,
             keyfile=config.mqtt_key or f"{config.data_dir}/certs/broker.key",
             strict_auth=config.mqtt_strict_auth, hub=hub,

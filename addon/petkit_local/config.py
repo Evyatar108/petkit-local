@@ -247,6 +247,12 @@ class Config:
 
     http_port: int = 80
     mqtt_port: int = 1883
+    #: Address the device-facing listeners (HTTP API, MQTT TLS, media bucket)
+    #: and the panel bind to. The default takes every interface. Set it on a
+    #: multi-homed host where another server already owns port 80 or 443 on a
+    #: different address. The plain MQTT listener stays on every interface,
+    #: because the internal bridge reaches it on 127.0.0.1.
+    bind_host: str = "0.0.0.0"
     #: What a device is told to call, and the only thing that tells it where we
     #: are. Empty means "auto-detect", which the add-on path resolves from the
     #: Supervisor's host IP and published port (`_auto_api_url`); a standalone
