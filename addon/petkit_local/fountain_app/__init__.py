@@ -1,5 +1,4 @@
-"""The fountain app for a W7H: visits, labels, stats, dataset export, alerts,
-and the sign-in check for the phone app's gateway.
+"""The fountain app for a W7H: visits, labels, stats, dataset export, alerts.
 
 Self-contained on purpose. Upstream reaches this package through one call,
 `register(app)` at the end of `web/panel.py::create_panel_app`; everything
@@ -22,7 +21,6 @@ from petkit_local.fountain_app.alerts import (
 from petkit_local.fountain_app.api import (
     api_fountain_export, api_fountain_label, api_fountain_stats, api_fountain_visits,
 )
-from petkit_local.fountain_app.auth import FOUNTAIN_AUTH, AuthGate, api_fountain_auth_check
 from petkit_local.fountain_app.state import FOUNTAIN_APP, FountainState, state_of
 
 log = logging.getLogger(__name__)
@@ -58,7 +56,6 @@ async def _start_alerts(app: web.Application) -> None:
 def register(app: web.Application) -> None:
     """Wire the fountain app onto the panel application, before it is frozen."""
     app[FOUNTAIN_APP] = FountainState()
-    app[FOUNTAIN_AUTH] = AuthGate()
     app.router.add_get("/api/fountain/visits", api_fountain_visits)
     app.router.add_post("/api/fountain/visits/{visit_key}/label", api_fountain_label)
     app.router.add_delete("/api/fountain/visits/{visit_key}/label", api_fountain_label)
@@ -67,7 +64,5 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/fountain/alerts", api_fountain_alerts)
     app.router.add_get("/api/fountain/alert-settings", api_fountain_alert_settings)
     app.router.add_post("/api/fountain/alert-settings", api_fountain_alert_settings)
-    # The phone app's gateway check (Caddy `forward_auth`); see `auth.py`.
-    app.router.add_get("/api/fountain/auth/check", api_fountain_auth_check)
     app.on_startup.append(_create_tables)
     app.on_startup.append(_start_alerts)
