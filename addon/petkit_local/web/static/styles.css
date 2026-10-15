@@ -1853,3 +1853,41 @@ button.help[aria-expanded='true'] {
 .cn input.dirty {
   border-color: var(--warn);
 }
+
+/* Fountain tab (fork-only, fountain.js). One block per filmed episode, the
+   clip at a size a cat is recognisable in, and the label chips set apart from
+   the header line. */
+.fx-visit .fx-head {
+  align-items: center;
+  margin-bottom: 8px;
+}
+.fx-labels {
+  display: inline-flex;
+  margin-bottom: 10px;
+}
+.fx-eps {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 12px;
+}
+.fx-ep {
+  flex: 0 1 320px;
+}
+.fx-ep-head {
+  font-size: 12px;
+  margin-bottom: 4px;
+}
+.fx-ep-foot {
+  margin-top: 6px;
+}
+.fx-clip {
+  display: block;
+  width: 100%;
+  aspect-ratio: 1;
+  object-fit: contain;
+  background: #000;
+  border-radius: 10px;
+}
+.fx-stats details {
+  margin-top: 8px;
+}

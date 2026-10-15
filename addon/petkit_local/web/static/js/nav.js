@@ -7,6 +7,7 @@ import { loadSetup } from './setup.js';
 import { loadProvision } from './provision.js';
 import { loadTimeline } from './timeline.js';
 import { loadPets } from './pets.js';
+import { loadFountain } from './fountain.js';
 
 document.querySelectorAll('nav button').forEach(b =>
   b.addEventListener('click', () => {
@@ -16,7 +17,17 @@ document.querySelectorAll('nav button').forEach(b =>
     });
     b.classList.add('on');
     b.setAttribute('aria-selected', 'true');
-    ['devices', 'timeline', 'pets', 'provision', 'log', 'capture', 'patchers', 'setup'].forEach(t =>
+    [
+      'devices',
+      'timeline',
+      'fountain',
+      'pets',
+      'provision',
+      'log',
+      'capture',
+      'patchers',
+      'setup',
+    ].forEach(t =>
       document.getElementById('tab-' + t).classList.toggle('hidden', t !== b.dataset.tab),
     );
     // Devices needs an entry now: refreshes are skipped while the tab is
@@ -29,6 +40,7 @@ document.querySelectorAll('nav button').forEach(b =>
     if (b.dataset.tab === 'provision') loadProvision();
     if (b.dataset.tab === 'timeline') loadTimeline();
     if (b.dataset.tab === 'pets') loadPets();
+    if (b.dataset.tab === 'fountain') loadFountain();
   }),
 );
 

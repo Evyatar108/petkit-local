@@ -45,6 +45,7 @@ import './provision.js';
 import './timeline.js';
 import './media.js';
 import './pets.js';
+import './fountain.js';
 import './cropper.js';
 
 // Is this page the one the server would serve now?
