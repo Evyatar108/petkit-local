@@ -600,6 +600,42 @@ async def test_an_alert_whose_start_is_out_of_reach_is_not_cleared(tmp_path, mon
         await store.close()
 
 
+async def test_a_label_change_rechecks_the_alerts_before_answering(tmp_path):
+    """Phone repro 2026-10-15: Holly's unrecognized drink was labeled, but the app's
+    refresh right after the save still showed her no-drink alert, because alerts were
+    only re-checked by the 60-second task."""
+    from petkit_local.fountain_app import alerts
+
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    holly = await pets.create("Holly")
+    now, hour = time.time(), 3600
+    await _seed(store,
+                _drink(now - 20 * hour, rel="OLD", end=now - 20 * hour + 30, first_id=50)
+                + _appearance(now - hour, pet_id=archie["id"])
+                + _drink(now - hour + 60, end=now - hour + 90)
+                + _drink(now - 600, rel="H", end=now - 560, first_id=60))
+    c = await _client(app)
+
+    async def active():
+        body = await (await c.get("/api/fountain/alerts")).json()
+        return [a["subject"] for a in body["active"]]
+
+    try:
+        await alerts.check_app(app)
+        assert await active() == [f"pet:{holly['id']}"]
+        r = await c.post("/api/fountain/visits/H/label",
+                         json={"device": FOUNTAIN, "label": str(holly["id"])})
+        assert r.status == 200
+        assert await active() == []
+        r = await c.delete(f"/api/fountain/visits/H/label?device={FOUNTAIN}")
+        assert r.status == 200
+        assert await active() == [f"pet:{holly['id']}"]
+    finally:
+        await c.close()
+        await store.close()
+
+
 async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
     app, _reg, store, _pets = _panel(tmp_path)
     c = await _client(app)

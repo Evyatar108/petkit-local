@@ -7,6 +7,7 @@ Timeline.
 """
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 from aiohttp import web
@@ -22,6 +23,8 @@ from petkit_local.utils.const import device_display_name
 from petkit_local.utils.timeutil import local_day_bounds, local_offset_hours
 from petkit_local.web.api._common import _json_body, _pet_fields, _pets_by_id, _refuse
 from petkit_local.web.api.media import _session_media_urls
+
+log = logging.getLogger(__name__)
 
 
 def is_fountain(device: Any) -> bool:
@@ -170,6 +173,7 @@ async def api_fountain_label(request: web.Request) -> web.Response:
 
     if request.method == "DELETE":
         removed = await db.delete_label(store, dev.petkit_id, visit_key)
+        await _recheck_alerts(request.app)
         return web.json_response({"ok": True, "removed": removed, "visit_key": visit_key})
 
     raw = body.get("label")
@@ -185,8 +189,24 @@ async def api_fountain_label(request: web.Request) -> web.Response:
     if not await _visit_exists(store, dev.petkit_id, visit_key):
         raise _refuse(web.HTTPNotFound, "unknown visit")
     await db.set_label(store, dev.petkit_id, visit_key, label)
+    await _recheck_alerts(request.app)
     return web.json_response({"ok": True, "visit_key": visit_key,
                               **label_fields(label, pets)})
+
+
+async def _recheck_alerts(app: web.Application) -> None:
+    """Re-judge the alerts now, so a refresh right after a label sees its effect.
+
+    A failed check must not fail the label that was already saved; the periodic
+    task tries again within a minute.
+    """
+    # alerts imports this module, so this import waits until it is needed.
+    from petkit_local.fountain_app.alerts import check_app  # noqa: PLC0415
+
+    try:
+        await check_app(app)
+    except Exception:
+        log.exception("fountain app: alert check after a label change failed")
 
 
 async def api_fountain_stats(request: web.Request) -> web.Response:
