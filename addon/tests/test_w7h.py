@@ -460,6 +460,15 @@ def test_an_action_the_firmware_rejects_cannot_be_built():
 
 # --- settings writes --------------------------------------------------------
 
+def test_signup_defaults_keep_the_water_flowing():
+    """The seeded settings are served to the device at signup and applied.
+    "Do not flow" or no auto-refill there stops the pump on adoption, which an
+    owner only notices as a dry fountain."""
+    seeded = defaults.default_settings(Device(device_type="w7h", petkit_id=1))
+    assert seeded["fountainMode"] != 0, "0 is do_not_flow"
+    assert seeded["addWaterSwitch"] == 1
+    assert seeded["petDetection"] == 1
+
 def test_every_settable_w7h_field_is_one_the_firmware_dispatches():
     """A `property.set` naming a field `ctrl` has no handler for is delivered
     and silently dropped — no error, no reply, no change. From this side that is

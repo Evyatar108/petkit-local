@@ -160,10 +160,16 @@ def default_settings(device: Device) -> dict[str, Any]:
             })
         return base
     if device.is_water_fountain:
+        # A fountain is served these at signup and applies them, so each one
+        # is an instruction. `fountainMode: 0` is "do not flow" and
+        # `addWaterSwitch: 0` stops refilling the bowl: a W7H adopted with them
+        # stopped its pump until the owner noticed a dry fountain. Flowing
+        # continuously, refilling and detecting pets are what the device does
+        # out of the box, so they decide nothing on the owner's behalf.
         return {
             "manualLock": 0, "lightMode": 0, "disturbMode": 0,
-            "addWaterSwitch": 0, "petDetection": 0, "heaterSwitch": 0,
-            "fountainMode": 0, "fountainTime": 12, "sleepTime": 12,
+            "addWaterSwitch": 1, "petDetection": 1, "heaterSwitch": 0,
+            "fountainMode": 1, "fountainTime": 12, "sleepTime": 12,
         }
     if device.is_purifier:
         return {
