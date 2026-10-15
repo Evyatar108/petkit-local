@@ -49,6 +49,11 @@ Two rules about placement that the map does not make obvious:
   were neither source: code `8` read "Cleaning started" but is the deodorizing cycle's completion.
 - **Days are cut at LOCAL midnight** (`utils/timeutil.local_day_bounds`), and the end of a day is
   midnight-next-day re-localized, never `start + 86400` — DST makes days 23 and 25 hours long.
+- **Fountain visit labels live in `fountain_visit_labels`, never in `events.pet_id`.** That table
+  belongs to the fork-only `fountain_app/` package (own `DeclarativeBase`, created on the event
+  store's engine at panel start-up). `bind_pet_ref` and the start-up backfill rewrite
+  `events.pet_id`, so a label written there would be lost. Upstream reaches the package only
+  through `register_fountain_app(app)` at the end of `web/panel.py::create_panel_app`.
 - **`event_id` is a SESSION key** shared by several distinct reports of one visit; it becomes
   `related_event`, and the dedup key is `event_id + event_type` — deduping on `event_id` alone
   loses every report of a session but the last.

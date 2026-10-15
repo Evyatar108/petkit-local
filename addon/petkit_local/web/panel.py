@@ -47,6 +47,7 @@ import aiohttp_jinja2
 import jinja2
 from aiohttp import web
 
+from petkit_local.fountain_app import register as register_fountain_app
 from petkit_local.utils.paths import UnsafePathError, safe_join
 
 from petkit_local.web.api.ble import (
@@ -282,6 +283,9 @@ def create_panel_app(registry: DeviceRegistry, ble_registry: BLERegistry | None,
     app.router.add_post("/api/pets/{id}/faces", api_pet_faces)
     app.router.add_delete("/api/pets/{id}/faces/{face_id}", api_pet_face_detail)
     app.router.add_get("/api/pets/{id}/faces/{face_id}/photo", api_pet_face_photo)
+
+    # --- fountain app (fork-only package; its routes live under /api/fountain/)
+    register_fountain_app(app)
     return app
 
 
