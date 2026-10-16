@@ -6,24 +6,25 @@ Log tab), and cleared the same way when its condition ends. The Fountain tab
 shows the active ones as a banner.
 
 * **No drink**: for each registered pet, the newest visit attributed to it
-  (label first, else the device's guess) that has a drinking episode is older
-  than the threshold (`no_drink_hours`, default 12). Not judged until the
-  store holds fountain events from before the threshold window, so a fresh
-  install or a new fountain does not alert on every cat at once.
+  (`stats.attributed`: label, else a confident model answer while
+  `use_model_answers` is on, else the device's guess) that has a drinking
+  episode is older than the threshold (`no_drink_hours`, default 12). Not
+  judged until the store holds fountain events from before the threshold
+  window, so a fresh install or a new fountain does not alert on every cat
+  at once.
 * **Tanks**: the latest W7H `error_start` naming `tankCL` (clean tank low) or
   `tankDF` (waste tank full) with no later `error_over` for it
   (`claim:tank-alerts-from-error-events`), however far back it lies. A tank
   alert is cleared only by a reported clear, never because its start fell
   out of the rows read. The raw hall sensors are not read.
 
-The threshold is kept in `{data_dir}/fountain_app.json`.
+The settings are kept in `{data_dir}/fountain_app.json` (see `settings.py`).
 """
 from __future__ import annotations
 
 import asyncio
 import json
 import logging
-import os
 import time
 from typing import Any
 
@@ -32,17 +33,14 @@ from aiohttp import web
 from petkit_local.events import codes
 from petkit_local.fountain_app import db
 from petkit_local.fountain_app.api import _store, fountains, visits_between
+from petkit_local.fountain_app.settings import SettingsError, settings_of, update_settings
 from petkit_local.fountain_app.state import state_of
 from petkit_local.fountain_app.stats import attributed
-from petkit_local.utils.coerce import to_float
-from petkit_local.utils.jsonio import atomic_write_json, read_json
 from petkit_local.web.api._common import _json_body, _refuse
 
 log = logging.getLogger(__name__)
 
 CHECK_INTERVAL_SEC = 60
-DEFAULT_NO_DRINK_HOURS = 12.0
-NO_DRINK_HOURS_RANGE = (1.0, 168.0)
 #: How far back the "last drank" time in a new no-drink alert is looked for.
 LAST_DRINK_LOOKBACK_SEC = 7 * 86400
 #: How long a cleared alert stays in the `recent` list.
@@ -52,35 +50,9 @@ RECENT_SEC = 7 * 86400
 TANK_SCAN_PAGE = 500
 TANK_SCAN_MAX = 20000
 TANK_FLAGS = ("tankCL", "tankDF")
-SETTINGS_FILE = "fountain_app.json"
 HUB_KIND = "fountain_alert"
 KIND_NO_DRINK = "no_drink"
 KIND_TANK = "tank"
-
-
-# --- settings ---------------------------------------------------------------
-
-
-def _settings_path(data_dir: str) -> str:
-    return os.path.join(data_dir, SETTINGS_FILE)
-
-
-def load_settings(data_dir: str | None) -> dict[str, float]:
-    """The alert settings, defaults filled in; defaults alone without a data dir."""
-    raw = read_json(_settings_path(data_dir), {}) if data_dir else {}
-    hours = to_float(raw.get("no_drink_hours") if isinstance(raw, dict) else None, None)
-    low, high = NO_DRINK_HOURS_RANGE
-    if hours is None or not low <= hours <= high:
-        hours = DEFAULT_NO_DRINK_HOURS
-    return {"no_drink_hours": hours}
-
-
-def settings_of(app: web.Application) -> dict[str, float]:
-    """The settings, read from disk once per process and then kept in memory."""
-    state = state_of(app)
-    if state.alert_settings is None:
-        state.alert_settings = load_settings(app["cfg"].get("data_dir"))
-    return state.alert_settings
 
 
 # --- conditions -------------------------------------------------------------
@@ -182,13 +154,16 @@ async def _tank_alerts(store, device_id: int
     return wanted, unknown
 
 async def _attributed_drinkers(store, device_ids: list[int], start: float,
-                               end: float) -> list[tuple[float, str]]:
+                               end: float, use_model: bool) -> list[tuple[float, str]]:
     """`(visit start, attributed key)` of every drinking visit, newest first."""
     found: list[tuple[float, str]] = []
     for did in device_ids:
         visits = await visits_between(store, did, start, end)
-        labels = await db.labels_for(store, did, [v["visit_key"] for v in visits])
-        found += [(v["start_ts"], attributed(v, labels.get(v["visit_key"])))
+        keys = [v["visit_key"] for v in visits]
+        labels = await db.labels_for(store, did, keys)
+        guesses = await db.guesses_for(store, did, keys)
+        found += [(v["start_ts"], attributed(v, labels.get(v["visit_key"]),
+                                             guesses.get(v["visit_key"]), use_model))
                   for v in visits if v["has_drinking"]]
     return sorted(found, reverse=True)
 
@@ -201,12 +176,13 @@ async def _has_history_before(store, device_ids: list[int], ts: float) -> bool:
 
 
 async def _no_drink_alerts(store, device_ids: list[int], pets: dict[int, str | None],
-                           hours: float, now: float,
-                           active: set[str]) -> dict[str, tuple[str, dict[str, Any]]]:
+                           hours: float, now: float, active: set[str],
+                           use_model: bool) -> dict[str, tuple[str, dict[str, Any]]]:
     since = now - hours * 3600
     if not pets or not device_ids or not await _has_history_before(store, device_ids, since):
         return {}
-    drank = {key for _, key in await _attributed_drinkers(store, device_ids, since, now + 1)}
+    drank = {key for _, key in await _attributed_drinkers(store, device_ids, since, now + 1,
+                                                          use_model)}
     out: dict[str, tuple[str, dict[str, Any]]] = {}
     older: list[tuple[float, str]] | None = None
     for pid, name in sorted(pets.items()):
@@ -218,7 +194,7 @@ async def _no_drink_alerts(store, device_ids: list[int], pets: dict[int, str | N
             # Only for a new alert: an active one keeps the detail it was raised with.
             if older is None:
                 older = await _attributed_drinkers(
-                    store, device_ids, since - LAST_DRINK_LOOKBACK_SEC, since)
+                    store, device_ids, since - LAST_DRINK_LOOKBACK_SEC, since, use_model)
             last = next((ts for ts, key in older if key == str(pid)), None)
         label = name or f"pet {pid}"
         out[subject] = (KIND_NO_DRINK, {
@@ -228,13 +204,15 @@ async def _no_drink_alerts(store, device_ids: list[int], pets: dict[int, str | N
 
 
 async def check(store, device_ids: list[int], pets: dict[int, str | None], hub,
-                no_drink_hours: float, now: float | None = None) -> dict[str, list]:
+                no_drink_hours: float, now: float | None = None,
+                use_model_answers: bool = True) -> dict[str, list]:
     """Raise and clear alerts so the table matches the conditions at `now`.
 
     Args:
         device_ids: The W7H fountains to read.
         pets: Pet id to name, for every registered pet.
         hub: The panel's `EventHub`, or None to skip the Log tab events.
+        use_model_answers: Whether confident model answers attribute visits.
 
     Returns:
         `{raised: [alert], cleared: [alert]}`, each alert as `db` returns it.
@@ -248,7 +226,7 @@ async def check(store, device_ids: list[int], pets: dict[int, str | None], hub,
         wanted.update(tank_wanted)
         unknown |= tank_unknown
     wanted.update(await _no_drink_alerts(store, device_ids, pets, no_drink_hours, now,
-                                         set(active)))
+                                         set(active), use_model_answers))
 
     raised, cleared = [], []
     for subject, (kind, detail) in wanted.items():
@@ -284,9 +262,10 @@ async def check_app(app: web.Application, now: float | None = None) -> dict[str,
         await state.tables.ensure(store)
         registry = app.get("pet_registry")
         pets = await registry.all() if registry is not None else []
+        settings = settings_of(app)
         return await check(store, [d.petkit_id for d in fountains(app)],
                            {p["id"]: p.get("name") for p in pets}, app.get("hub"),
-                           settings_of(app)["no_drink_hours"], now)
+                           settings["no_drink_hours"], now, settings["use_model_answers"])
 
 
 async def alert_loop(app: web.Application) -> None:
@@ -317,26 +296,20 @@ async def api_fountain_alerts(request: web.Request) -> web.Response:
 
 
 async def api_fountain_alert_settings(request: web.Request) -> web.Response:
-    """`GET` or `POST /api/fountain/alert-settings` (`{"no_drink_hours": 12}`).
+    """`GET` or `POST /api/fountain/alert-settings`.
 
-    A change is saved, then checked at once, so the banner follows it without
-    waiting for the next periodic check.
+    `GET` answers `{"no_drink_hours": 12.0, "use_model_answers": true}`.
+    `POST` takes either field or both; a field the body omits keeps its
+    stored value. A change is saved, then checked at once, so the banner
+    follows it without waiting for the next periodic check.
     """
     if request.method == "GET":
         return web.json_response(settings_of(request.app))
     body = await _json_body(request)
-    raw = body.get("no_drink_hours")
-    hours = None if isinstance(raw, bool) else to_float(raw, None)
-    low, high = NO_DRINK_HOURS_RANGE
-    if hours is None or not low <= hours <= high:
-        raise _refuse(web.HTTPBadRequest,
-                      f"no_drink_hours must be a number from {low:g} to {high:g}")
-    data_dir = request.app["cfg"].get("data_dir")
-    if not data_dir:
-        raise _refuse(web.HTTPBadRequest, "no data directory configured")
-    settings = {"no_drink_hours": hours}
-    await asyncio.to_thread(atomic_write_json, _settings_path(data_dir), settings)
-    state_of(request.app).alert_settings = settings
+    try:
+        settings = await update_settings(request.app, body)
+    except SettingsError as e:
+        raise _refuse(web.HTTPBadRequest, str(e)) from None
     result = await check_app(request.app)
     return web.json_response({"ok": True, "settings": settings,
                               "raised": len(result["raised"]) if result else 0,

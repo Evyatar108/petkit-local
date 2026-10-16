@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, field
+from typing import Any
 
 from aiohttp import web
 
@@ -22,8 +23,10 @@ class FountainState:
     export_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Serializes alert checks (the periodic task and a settings change).
     alert_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
-    #: `alerts.load_settings` result, read on first use.
-    alert_settings: dict[str, float] | None = None
+    #: Serializes settings writes, so two partial changes cannot lose one another.
+    settings_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: `settings.load_settings` result, read on first use.
+    alert_settings: dict[str, Any] | None = None
 
 
 def state_of(app: web.Application) -> FountainState:

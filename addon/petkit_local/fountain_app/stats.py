@@ -5,8 +5,11 @@ Pure functions. Days are cut at LOCAL midnight through
 or 25 hours long and still counted once.
 
 Each visit counts for its **attributed cat**: the label if there is one, else
-the fountain's own guess, else unknown. A visit labeled "not a cat" counts for
-nobody and is reported only as a total.
+the cat-ID model's answer when it names a cat with confidence of at least
+`MODEL_CONFIDENT` and the `use_model_answers` setting is on
+(`decision:model-answer-counts-when-confident`), else the fountain's own
+guess, else unknown. A visit labeled "not a cat" counts for nobody and is
+reported only as a total.
 """
 from __future__ import annotations
 
@@ -18,14 +21,36 @@ from petkit_local.utils.timeutil import DATE_FORMAT, local_day_bounds
 
 #: The ranges the stats view offers.
 ALLOWED_DAYS = (7, 30)
+#: The least confidence at which a model answer decides attribution.
+MODEL_CONFIDENT = 0.8
 
 
-def attributed(visit: dict[str, Any], label: str | None) -> str:
-    """The attributed cat of one visit: a pet id string, or a special label."""
+def model_pet(guess: dict[str, Any] | None) -> int | None:
+    """The pet a stored model answer names, or None for "not sure" or no answer."""
+    label = guess.get("label") if guess else None
+    return int(label) if isinstance(label, str) and label.isdigit() else None
+
+
+def model_confident(guess: dict[str, Any] | None) -> bool:
+    """True if a stored model answer names a cat confidently enough to count."""
+    return (model_pet(guess) is not None
+            and (guess.get("confidence") or 0) >= MODEL_CONFIDENT)
+
+
+def attributed(visit: dict[str, Any], label: str | None,
+               guess: dict[str, Any] | None = None, use_model: bool = False) -> str:
+    """The attributed cat of one visit: a pet id string, or a special label.
+
+    Args:
+        guess: The visit's stored model answer (`db.guesses_for`), or None.
+        use_model: The `use_model_answers` setting; off ignores `guess`.
+    """
     if label:
         return label
-    guess = visit.get("device_guess")
-    return str(guess) if guess is not None else LABEL_UNKNOWN
+    if use_model and model_confident(guess):
+        return str(model_pet(guess))
+    guess_id = visit.get("device_guess")
+    return str(guess_id) if guess_id is not None else LABEL_UNKNOWN
 
 
 def day_spans(days: int, now: float | None = None) -> list[tuple[str, float, float]]:
@@ -55,7 +80,8 @@ def _empty_series(key: str, n_days: int, dates: list[str]) -> dict[str, Any]:
 
 def aggregate(visits: list[dict[str, Any]], labels: dict[str, str],
               spans: list[tuple[str, float, float]],
-              pet_ids: list[int]) -> dict[str, Any]:
+              pet_ids: list[int], guesses: dict[str, dict[str, Any]] | None = None,
+              use_model: bool = False) -> dict[str, Any]:
     """Stats for `visits` over `spans`.
 
     Args:
@@ -64,6 +90,8 @@ def aggregate(visits: list[dict[str, Any]], labels: dict[str, str],
         labels: `visit_key -> label` for this device.
         spans: `day_spans` output.
         pet_ids: Every known pet, so a cat with no visits still gets a row.
+        guesses: `visit_key -> stored model answer`, for `attributed`.
+        use_model: The `use_model_answers` setting, for `attributed`.
 
     Returns:
         `{dates, series, not_a_cat, visits, labeled}`. `series` holds one entry
@@ -88,7 +116,7 @@ def aggregate(visits: list[dict[str, Any]], labels: dict[str, str],
         total += 1
         if label:
             labeled += 1
-        key = attributed(v, label)
+        key = attributed(v, label, (guesses or {}).get(v["visit_key"]), use_model)
         if key == LABEL_NOT_A_CAT:
             not_a_cat += 1
             continue

@@ -15,7 +15,8 @@ from aiohttp import web
 from petkit_local.events import codes
 from petkit_local.fountain_app import db, stats
 from petkit_local.fountain_app.export import export_dataset
-from petkit_local.fountain_app.models import SPECIAL_LABELS
+from petkit_local.fountain_app.models import ANSWER_NOT_SURE, SPECIAL_LABELS
+from petkit_local.fountain_app.settings import settings_of
 from petkit_local.fountain_app.state import state_of
 from petkit_local.fountain_app.visits import VISIT_WINDOW_SEC, build_visits
 from petkit_local.utils.coerce import to_int
@@ -100,19 +101,44 @@ def label_fields(label: str | None, pets: dict[int, dict[str, Any]]) -> dict[str
     return {"label": label, "label_pet_id": pet_id, "label_name": name}
 
 
+def model_fields(guess: dict[str, Any] | None,
+                 pets: dict[int, dict[str, Any]]) -> dict[str, Any]:
+    """`{model_guess, model_guess_name, model_confidence, model_not_sure,
+    model_confident}` for one visit's stored model answer (or None)."""
+    pet_id = stats.model_pet(guess)
+    name = None
+    if pet_id is not None:
+        name = _pet_fields(pets, pet_id)["pet_name"] or f"pet {pet_id}"
+    return {
+        "model_guess": pet_id,
+        "model_guess_name": name,
+        "model_confidence": guess["confidence"] if guess else None,
+        "model_not_sure": bool(guess) and guess["label"] == ANSWER_NOT_SURE,
+        "model_confident": stats.model_confident(guess),
+    }
+
+
 def visit_payload(v: dict[str, Any], label: str | None, pets: dict[int, dict[str, Any]],
-                  media_root: str) -> dict[str, Any]:
-    """One visit as the panel receives it."""
-    guess = _pet_fields(pets, v["device_guess"])
+                  media_root: str, guess: dict[str, Any] | None = None,
+                  use_model: bool = False) -> dict[str, Any]:
+    """One visit as the panel receives it.
+
+    `attributed` follows `stats.attributed`; `attributed_unlabeled` is the
+    same with the label ignored, so a client can show a label it has just
+    saved over what the visit would be without one.
+    """
+    guess_fields = _pet_fields(pets, v["device_guess"])
     return {
         **{k: v[k] for k in ("visit_key", "device_id", "start_ts", "appeared_ts",
                              "drink_start_ts", "drink_end_ts", "duration_sec",
                              "drink_time_sec", "device_guess", "has_appearance",
                              "has_drinking", "event_ids")},
-        "device_guess_name": guess["pet_name"],
-        "device_guess_photo_url": guess["pet_photo_url"],
+        "device_guess_name": guess_fields["pet_name"],
+        "device_guess_photo_url": guess_fields["pet_photo_url"],
         **label_fields(label, pets),
-        "attributed": stats.attributed(v, label),
+        **model_fields(guess, pets),
+        "attributed": stats.attributed(v, label, guess, use_model),
+        "attributed_unlabeled": stats.attributed(v, None, guess, use_model),
         "episodes": [
             {"kind": e["kind"], "related_event": e["related_event"], "start_ts": e["start_ts"],
              "media": _session_media_urls(e["media"], media_root)}
@@ -135,7 +161,10 @@ async def api_fountain_visits(request: web.Request) -> web.Response:
     await state_of(request.app).tables.ensure(store)
     start_ts, end_ts, day_label = local_day_bounds(request.query.get("date", ""))
     found = await visits_between(store, dev.petkit_id, start_ts, end_ts)
-    labels = await db.labels_for(store, dev.petkit_id, [v["visit_key"] for v in found])
+    keys = [v["visit_key"] for v in found]
+    labels = await db.labels_for(store, dev.petkit_id, keys)
+    guesses = await db.guesses_for(store, dev.petkit_id, keys)
+    use_model = settings_of(request.app)["use_model_answers"]
     pets = await _pets_by_id(request)
     media_root = request.app["cfg"].get("media_root", "")
     return web.json_response({
@@ -144,7 +173,8 @@ async def api_fountain_visits(request: web.Request) -> web.Response:
         "date": day_label,
         "tz_offset": int(round(local_offset_hours(start_ts) * 3600)),
         "pets": _pet_list(pets),
-        "visits": [visit_payload(v, labels.get(v["visit_key"]), pets, media_root)
+        "visits": [visit_payload(v, labels.get(v["visit_key"]), pets, media_root,
+                                 guesses.get(v["visit_key"]), use_model)
                    for v in found],
     })
 
@@ -195,10 +225,11 @@ async def api_fountain_label(request: web.Request) -> web.Response:
 
 
 async def _recheck_alerts(app: web.Application) -> None:
-    """Re-judge the alerts now, so a refresh right after a label sees its effect.
+    """Re-judge the alerts now, so a refresh right after a label or model
+    answer sees its effect.
 
-    A failed check must not fail the label that was already saved; the periodic
-    task tries again within a minute.
+    A failed check must not fail the change that was already saved; the
+    periodic task tries again within a minute.
     """
     # alerts imports this module, so this import waits until it is needed.
     from petkit_local.fountain_app.alerts import check_app  # noqa: PLC0415
@@ -206,7 +237,7 @@ async def _recheck_alerts(app: web.Application) -> None:
     try:
         await check_app(app)
     except Exception:
-        log.exception("fountain app: alert check after a label change failed")
+        log.exception("fountain app: alert check after a label or answer change failed")
 
 
 async def api_fountain_stats(request: web.Request) -> web.Response:
@@ -224,9 +255,12 @@ async def api_fountain_stats(request: web.Request) -> web.Response:
     await state_of(request.app).tables.ensure(store)
     spans = stats.day_spans(days)
     found = await visits_between(store, dev.petkit_id, spans[0][1], spans[-1][2])
-    labels = await db.labels_for(store, dev.petkit_id, [v["visit_key"] for v in found])
+    keys = [v["visit_key"] for v in found]
+    labels = await db.labels_for(store, dev.petkit_id, keys)
+    guesses = await db.guesses_for(store, dev.petkit_id, keys)
     pets = await _pets_by_id(request)
-    result = stats.aggregate(found, labels, spans, sorted(pets))
+    result = stats.aggregate(found, labels, spans, sorted(pets), guesses,
+                             settings_of(request.app)["use_model_answers"])
     for s in result["series"]:
         s.update(label_fields(s["key"], pets))
     return web.json_response({

@@ -642,14 +642,15 @@ async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
     try:
         assert any(t.get_name() == "fountain-alerts" for t in app["background_tasks"])
         assert await (await c.get("/api/fountain/alert-settings")).json() == {
-            "no_drink_hours": 12.0}
+            "no_drink_hours": 12.0, "use_model_answers": True}
         for bad in (0.5, 200, "soon", True, None):
             r = await c.post("/api/fountain/alert-settings", json={"no_drink_hours": bad})
             assert r.status == 400, bad
         r = await c.post("/api/fountain/alert-settings", json={"no_drink_hours": 24})
         assert r.status == 200
         body = await (await c.get("/api/fountain/alerts")).json()
-        assert body == {"active": [], "recent": [], "settings": {"no_drink_hours": 24.0}}
+        assert body == {"active": [], "recent": [],
+                        "settings": {"no_drink_hours": 24.0, "use_model_answers": True}}
     finally:
         await c.close()
     assert not app["background_tasks"]
@@ -657,7 +658,7 @@ async def test_alert_settings_persist_and_the_check_task_starts(tmp_path):
     c = await _client(app2)
     try:
         assert await (await c.get("/api/fountain/alert-settings")).json() == {
-            "no_drink_hours": 24.0}
+            "no_drink_hours": 24.0, "use_model_answers": True}
     finally:
         await c.close()
         await store.close()
