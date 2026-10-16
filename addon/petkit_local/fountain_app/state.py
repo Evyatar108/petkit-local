@@ -25,6 +25,8 @@ class FountainState:
     alert_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Serializes settings writes, so two partial changes cannot lose one another.
     settings_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Held across a model answer's revision check and write (`model_guess.py`).
+    model_guess_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: `settings.load_settings` result, read on first use.
     alert_settings: dict[str, Any] | None = None
 

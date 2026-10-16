@@ -20,7 +20,10 @@ has no input revision.
 **Answers** (`decision:job-recovery`). One row per device and visit, insert
 or replace. An answer is refused with 409, keeping the stored row, unless
 its `input_rev` is the visit's current one and its `model_seq` is not older
-than the stored answer's.
+than the stored answer's. Working out the current revision, both checks and
+the write run as one step under `FountainState.model_guess_lock`, so an
+answer computed against footage that changed meanwhile cannot replace the
+answer for the new footage.
 """
 from __future__ import annotations
 
@@ -222,31 +225,45 @@ async def api_fountain_model_guess(request: web.Request) -> web.Response:
     dev = _device(request.app, request.query.get("device") or body.get("device"))
     await state_of(request.app).tables.ensure(store)
 
+    guess_lock = state_of(request.app).model_guess_lock
     if request.method == "DELETE":
-        removed = await db.delete_guess(store, dev.petkit_id, visit_key)
+        async with guess_lock:
+            removed = await db.delete_guess(store, dev.petkit_id, visit_key)
         await _recheck_alerts(request.app)
         return web.json_response({"ok": True, "removed": removed, "visit_key": visit_key})
 
     pets = await _pets_by_id(request)
     answer = _answer(body, pets)
-    visit = await db.visit_by_key(store, dev.petkit_id, visit_key)
-    if visit is None:
-        raise _refuse(web.HTTPNotFound, "unknown visit")
-    current = await asyncio.to_thread(visit_input, visit, request.app["cfg"].get(
-        "media_root", ""), time.time())
+    media_root = request.app["cfg"].get("media_root", "")
 
-    def conflict(reason: str, error: str, stored: dict[str, Any] | None) -> web.Response:
+    async def current_input() -> dict[str, Any]:
+        visit = await db.visit_by_key(store, dev.petkit_id, visit_key)
+        if visit is None:
+            raise _refuse(web.HTTPNotFound, "unknown visit")
+        return await asyncio.to_thread(visit_input, visit, media_root, time.time())
+
+    async def conflict(current: dict[str, Any], reason: str, error: str,
+                       stored: dict[str, Any] | None = None) -> web.Response:
+        if stored is None:
+            stored = (await db.guesses_for(store, dev.petkit_id, [visit_key])).get(visit_key)
         return web.json_response({"error": error, "reason": reason,
                                   "input_rev": current["input_rev"],
                                   "readiness": current["readiness"], "stored": stored},
                                  status=409)
 
+    # A stale answer is refused here without waiting behind other answers...
+    current = await current_input()
     if answer["input_rev"] != current["input_rev"]:
-        stored = (await db.guesses_for(store, dev.petkit_id, [visit_key])).get(visit_key)
-        return conflict("stale_input", "input revision is not current", stored)
-    saved, row = await db.put_guess(store, dev.petkit_id, visit_key, answer)
+        return await conflict(current, "stale_input", "input revision is not current")
+    # ...but only the check made under the lock decides: footage can change,
+    # and another answer can be stored, while this request waits or runs.
+    async with guess_lock:
+        current = await current_input()
+        if answer["input_rev"] != current["input_rev"]:
+            return await conflict(current, "stale_input", "input revision is not current")
+        saved, row = await db.put_guess(store, dev.petkit_id, visit_key, answer)
     if not saved:
-        return conflict("older_model", "a newer model's answer is stored", row)
+        return await conflict(current, "older_model", "a newer model's answer is stored", row)
     await _recheck_alerts(request.app)
     return web.json_response({"ok": True, "visit_key": visit_key, "stored": row,
                               **model_fields(row, pets)})

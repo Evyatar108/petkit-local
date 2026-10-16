@@ -5,13 +5,15 @@ stored answer does to the visits, the stats and the no-drink alert. The
 running example is the plan's: Holly drinks at the fountain, the fountain
 names nobody, and the model answers "Holly" at 0.97.
 """
+import asyncio
 import os
+import threading
 import time
 from datetime import datetime, timedelta
 
 import pytest
 
-from petkit_local.fountain_app import alerts, db, stats
+from petkit_local.fountain_app import alerts, db, model_guess, stats
 from tests.test_fountain_app import FOUNTAIN, _appearance, _client, _drink, _noon, _panel, _seed
 
 HOUR = 3600
@@ -242,6 +244,58 @@ async def test_an_older_models_answer_is_refused_and_the_newer_kept(tmp_path):
 
 
 # --- readiness and input revision ------------------------------------------------
+
+
+async def test_an_answer_whose_footage_changed_while_it_was_checked_cannot_replace_the_newer(
+        tmp_path, monkeypatch):
+    """Review C2: answer A works out the visit's revision R1 and pauses; the
+    recording is replaced (R2) and answer B for R2 is stored by the same
+    model; A resumes. A must not replace B."""
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    holly = await pets.create("Holly")
+    t0 = _noon()
+    await _seed(store, _drink(t0, rel="H", end=t0 + 40))
+    await _media(store, tmp_path, "H", "fullVideo", "Playback/h.mp4")
+    real = model_guess.visit_input
+    a_checked, resume_a = threading.Event(), threading.Event()
+    calls = 0
+
+    def pausing_visit_input(*args):
+        nonlocal calls
+        calls += 1
+        result = real(*args)
+        if calls == 1:
+            a_checked.set()
+            resume_a.wait(10)
+        return result
+
+    c = await _client(app)
+    url = "/api/fountain/visits/H/model-guess"
+    try:
+        r1 = (await _work(c))["H"]["input_rev"]
+        monkeypatch.setattr(model_guess, "visit_input", pausing_visit_input)
+        a = asyncio.create_task(c.post(url, json=_answer(archie["id"], r1)))
+        assert await asyncio.to_thread(a_checked.wait, 10)
+
+        (tmp_path / "media" / "Playback" / "h.mp4").write_bytes(b"\x02" * 256)
+        r2 = (await _work(c))["H"]["input_rev"]
+        assert r2 != r1
+        b = await asyncio.wait_for(c.post(url, json=_answer(holly["id"], r2)), 10)
+        assert b.status == 200
+
+        resume_a.set()
+        a = await asyncio.wait_for(a, 10)
+        assert a.status == 409
+        body = await a.json()
+        assert (body["reason"], body["input_rev"]) == ("stale_input", r2)
+        assert body["stored"]["input_rev"] == r2
+        stored = (await _work(c))["H"]["model_guess"]
+        assert (stored["label"], stored["input_rev"]) == (str(holly["id"]), r2)
+    finally:
+        resume_a.set()
+        await c.close()
+        await store.close()
 
 
 async def test_a_second_episodes_recording_makes_a_new_revision_and_refuses_the_old(tmp_path):
