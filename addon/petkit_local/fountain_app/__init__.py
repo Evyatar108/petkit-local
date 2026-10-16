@@ -1,5 +1,5 @@
 """The fountain app for a W7H: visits, labels, stats, dataset export, alerts,
-and a status summary.
+a status summary, and the cat-ID job's work list and answers.
 
 Self-contained on purpose. Upstream reaches this package through one call,
 `register(app)` at the end of `web/panel.py::create_panel_app`; everything
@@ -21,6 +21,9 @@ from petkit_local.fountain_app.alerts import (
 )
 from petkit_local.fountain_app.api import (
     api_fountain_export, api_fountain_label, api_fountain_stats, api_fountain_visits,
+)
+from petkit_local.fountain_app.model_guess import (
+    api_fountain_labels, api_fountain_model_guess, api_fountain_model_work,
 )
 from petkit_local.fountain_app.state import FOUNTAIN_APP, FountainState, state_of
 from petkit_local.fountain_app.status import api_fountain_status
@@ -61,6 +64,12 @@ def register(app: web.Application) -> None:
     app.router.add_get("/api/fountain/visits", api_fountain_visits)
     app.router.add_post("/api/fountain/visits/{visit_key}/label", api_fountain_label)
     app.router.add_delete("/api/fountain/visits/{visit_key}/label", api_fountain_label)
+    app.router.add_post("/api/fountain/visits/{visit_key}/model-guess",
+                        api_fountain_model_guess)
+    app.router.add_delete("/api/fountain/visits/{visit_key}/model-guess",
+                          api_fountain_model_guess)
+    app.router.add_get("/api/fountain/model/work", api_fountain_model_work)
+    app.router.add_get("/api/fountain/labels", api_fountain_labels)
     app.router.add_get("/api/fountain/stats", api_fountain_stats)
     app.router.add_post("/api/fountain/export", api_fountain_export)
     app.router.add_get("/api/fountain/alerts", api_fountain_alerts)
