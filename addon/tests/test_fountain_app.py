@@ -16,7 +16,7 @@ from aiohttp.test_utils import TestClient, TestServer
 from petkit_local.ai.pets import PetRegistry
 from petkit_local.devices.registry import DeviceRegistry
 from petkit_local.events.store import EventStore
-from petkit_local.fountain_app import stats
+from petkit_local.fountain_app import db, stats
 from petkit_local.fountain_app.visits import build_visits
 from petkit_local.web.hub import EventHub
 from petkit_local.web.panel import create_panel_app
@@ -162,7 +162,8 @@ def test_stats_attribute_by_label_then_guess_and_count_not_a_cat_apart():
     s1, s2, unknown = out["series"]
     assert (s1["key"], s1["visits"], s1["drink_sec"], s1["labeled"]) == ("1", 1, 60, 0)
     assert (s2["key"], s2["visits"], s2["drink_sec"], s2["labeled"]) == ("2", 1, 40, 1)
-    assert s2["daily"][-1] == {"date": out["dates"][-1], "visits": 1, "drink_sec": 40}
+    assert s2["daily"][-1] == {"date": out["dates"][-1], "visits": 1, "drinks": 0,
+                               "drink_sec": 40}
     assert (unknown["key"], unknown["visits"]) == ("unknown", 1)
 
 
@@ -244,6 +245,59 @@ async def test_visits_label_round_trip_and_stats(tmp_path):
         assert (await r.json())["removed"] is True
         body = await (await c.get("/api/fountain/visits")).json()
         assert body["visits"][1]["label"] is None
+    finally:
+        await c.close()
+        await store.close()
+
+
+async def test_stats_count_drinks_beside_visits_for_the_attributed_cat(tmp_path):
+    """`delivery:stats-drinks-count`: Archie's arrival with no drinking and a
+    drink he is labeled for are two visits but one drink; a confident model
+    answer and a "not a cat" label move drinks as they move visits."""
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    holly = await pets.create("Holly")
+    t0 = _noon()
+    await _seed(store, _appearance(t0, pet_id=archie["id"])
+                + _drink(t0 + 3600, rel="B", end=t0 + 3640)
+                + _drink(t0 + 7200, rel="C", end=t0 + 7230, first_id=30))
+    c = await _client(app)
+
+    async def counts():
+        st = await (await c.get("/api/fountain/stats?days=7")).json()
+        out = {}
+        for s in st["series"]:
+            today = s["daily"][-1]
+            assert (today["visits"], today["drinks"]) == (s["visits"], s["drinks"])
+            assert all(d["drinks"] == 0 for d in s["daily"][:-1])
+            out[s["key"]] = (s["visits"], s["drinks"], s["drink_sec"], s["drink_time_sec"])
+        return out, st
+
+    try:
+        durations = {v["visit_key"]: v["duration_sec"] for v in
+                     (await (await c.get("/api/fountain/visits")).json())["visits"]}
+        a, h = str(archie["id"]), str(holly["id"])
+        got, _ = await counts()
+        assert (got[a][:2], got["unknown"][:2]) == ((1, 0), (2, 2))
+
+        r = await c.post("/api/fountain/visits/B/label",
+                         json={"device": FOUNTAIN, "label": archie["id"]})
+        assert r.status == 200
+        got, _ = await counts()
+        assert got[a] == (2, 1, (durations["A"] or 0) + durations["B"], 34)
+        assert got["unknown"][:2] == (1, 1)
+
+        await db.put_guess(store, FOUNTAIN, "C", {"label": h, "confidence": 0.97, "crops": 9,
+                                                  "model_seq": 1, "input_rev": "r"})
+        got, _ = await counts()
+        assert (got[h][:2], got["unknown"][:2]) == ((1, 1), (0, 0))
+
+        r = await c.post("/api/fountain/visits/C/label",
+                         json={"device": FOUNTAIN, "label": "not_a_cat"})
+        assert r.status == 200
+        got, st = await counts()
+        assert (got[a][:2], got[h][:2], got["unknown"][:2]) == ((2, 1), (0, 0), (0, 0))
+        assert (st["visits"], st["not_a_cat"]) == (3, 1)
     finally:
         await c.close()
         await store.close()

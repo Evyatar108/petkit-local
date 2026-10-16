@@ -73,8 +73,9 @@ def _empty_series(key: str, n_days: int, dates: list[str]) -> dict[str, Any]:
     return {
         "key": key,
         "pet_id": int(key) if key.isdigit() else None,
-        "visits": 0, "labeled": 0, "drink_sec": 0, "drink_time_sec": 0,
-        "daily": [{"date": d, "visits": 0, "drink_sec": 0} for d in dates[:n_days]],
+        "visits": 0, "drinks": 0, "labeled": 0, "drink_sec": 0, "drink_time_sec": 0,
+        "daily": [{"date": d, "visits": 0, "drinks": 0, "drink_sec": 0}
+                  for d in dates[:n_days]],
     }
 
 
@@ -97,8 +98,10 @@ def aggregate(visits: list[dict[str, Any]], labels: dict[str, str],
         `{dates, series, not_a_cat, visits, labeled}`. `series` holds one entry
         per pet (in `pet_ids` order), then any other attributed key, then
         `unknown`; each entry has totals and a `daily` list aligned with
-        `dates`. `drink_sec` sums visit durations; `drink_time_sec` sums the
-        device's own `drink_time`.
+        `dates`. `drinks` counts the visits with a drinking episode
+        (`has_drinking`, `decision:drinks-first-display`), attributed and
+        dated like `visits`. `drink_sec` sums visit durations; `drink_time_sec`
+        sums the device's own `drink_time`.
     """
     dates = [s[0] for s in spans]
     series: dict[str, dict[str, Any]] = {}
@@ -122,11 +125,14 @@ def aggregate(visits: list[dict[str, Any]], labels: dict[str, str],
             continue
         row = series.setdefault(key, _empty_series(key, len(dates), dates))
         dur = v.get("duration_sec") or 0
+        drank = 1 if v.get("has_drinking") else 0
         row["visits"] += 1
+        row["drinks"] += drank
         row["labeled"] += 1 if label else 0
         row["drink_sec"] += dur
         row["drink_time_sec"] += v.get("drink_time_sec") or 0
         row["daily"][idx]["visits"] += 1
+        row["daily"][idx]["drinks"] += drank
         row["daily"][idx]["drink_sec"] += dur
 
     ordered = [series.pop(str(pid)) for pid in pet_ids]
