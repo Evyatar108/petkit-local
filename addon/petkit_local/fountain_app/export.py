@@ -27,7 +27,6 @@ from pathlib import Path
 from typing import Any
 
 from petkit_local.fountain_app import db
-from petkit_local.fountain_app.visits import VISIT_WINDOW_SEC, build_visits
 from petkit_local.media.transcode import THUMB_TIMEOUT, have_ffmpeg, run_ffmpeg
 
 log = logging.getLogger(__name__)
@@ -45,22 +44,6 @@ def _ready(media: list[dict[str, Any]], categories: tuple[str, ...]) -> list[str
     return [m["media_path"] for m in media
             if m.get("category") in categories and m.get("status") == "ready"
             and m.get("media_path") and os.path.isfile(m["media_path"])]
-
-
-async def _visit_for(store, device_id: int, visit_key: str) -> dict[str, Any] | None:
-    """The visit anchored at `visit_key`, rebuilt from its stored events.
-
-    Looked up around the start the anchor reports, not when it arrived, as
-    the day view does (see `db.visit_rows`).
-    """
-    own = await db.linked_rows(store, device_id, [visit_key])
-    anchor = next((v for v in build_visits(own) if v["visit_key"] == visit_key), None)
-    if anchor is None:
-        return None
-    ts = anchor["start_ts"]
-    rows = await db.visit_rows(store, device_id, ts - VISIT_WINDOW_SEC, ts + VISIT_WINDOW_SEC,
-                               VISIT_WINDOW_SEC)
-    return next((v for v in build_visits(rows) if v["visit_key"] == visit_key), None)
 
 
 async def _clip_frames(clip: str, staging: Path, prefix: str) -> list[Path]:
@@ -124,7 +107,7 @@ async def export_dataset(store, device_id: int, data_dir: str | Path,
     try:
         for item in labels:
             key, label = item["visit_key"], item["label"]
-            visit = await _visit_for(store, device_id, key)
+            visit = await db.visit_by_key(store, device_id, key)
             if visit is None:
                 missing += 1
                 continue

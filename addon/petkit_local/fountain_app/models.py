@@ -10,6 +10,9 @@ A label is keyed by (`device_id`, `visit_key`), never written into
 rewrite those columns, so a correction stored there would be lost. Labels also
 outlive event pruning on purpose, so a training set is not lost with its
 events.
+
+The cat-ID job's answers live in their own table, `fountain_model_guesses`,
+so the model never writes a label (`requirement:labels-stay-human`).
 """
 from __future__ import annotations
 
@@ -20,6 +23,8 @@ from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 LABEL_UNKNOWN = "unknown"
 LABEL_NOT_A_CAT = "not_a_cat"
 SPECIAL_LABELS = (LABEL_UNKNOWN, LABEL_NOT_A_CAT)
+#: The model's answer when it cannot tell the cats apart.
+ANSWER_NOT_SURE = "not_sure"
 
 
 class FountainBase(DeclarativeBase):
@@ -44,6 +49,33 @@ class VisitLabel(FountainBase):
     visit_key: Mapped[str] = mapped_column(Text, nullable=False)
     label: Mapped[str] = mapped_column(Text, nullable=False)
     labeled_at: Mapped[float] = mapped_column(REAL, nullable=False)
+
+
+class ModelGuess(FountainBase):
+    """The cat-ID model's answer for one visit, one row per device and visit.
+
+    `label` is a pet id as a decimal string, or `ANSWER_NOT_SURE`.
+    `confidence` (0 to 1) is the share of the model's sure crops that agree;
+    `crops` counts the whole-cat crops it saw. `input_rev` is the visit's
+    input revision the answer was made from, and `model_seq` the model's
+    sequence number: the panel refuses an answer for footage that is no
+    longer current or from an older model than the stored one.
+    """
+
+    __tablename__ = "fountain_model_guesses"
+    __table_args__ = (
+        UniqueConstraint("device_id", "visit_key", name="uq_fountain_model_guesses_visit"),
+    )
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    device_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    visit_key: Mapped[str] = mapped_column(Text, nullable=False)
+    label: Mapped[str] = mapped_column(Text, nullable=False)
+    confidence: Mapped[float] = mapped_column(REAL, nullable=False)
+    crops: Mapped[int] = mapped_column(Integer, nullable=False)
+    model_seq: Mapped[int] = mapped_column(Integer, nullable=False)
+    input_rev: Mapped[str] = mapped_column(Text, nullable=False)
+    scored_at: Mapped[float] = mapped_column(REAL, nullable=False)
 
 
 class FountainAlert(FountainBase):

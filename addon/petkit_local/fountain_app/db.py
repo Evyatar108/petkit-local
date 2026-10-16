@@ -19,8 +19,10 @@ from sqlalchemy import REAL, ColumnElement, and_, case, cast, delete, func, or_,
 
 from petkit_local.events import codes
 from petkit_local.events.models import Event, Media
-from petkit_local.fountain_app.models import FountainAlert, FountainBase, VisitLabel
-from petkit_local.fountain_app.visits import reported_start
+from petkit_local.fountain_app.models import (
+    FountainAlert, FountainBase, ModelGuess, VisitLabel,
+)
+from petkit_local.fountain_app.visits import VISIT_WINDOW_SEC, build_visits, reported_start
 
 if TYPE_CHECKING:
     from petkit_local.events.store import EventStore
@@ -97,6 +99,67 @@ async def delete_label(store: EventStore, device_id: int, visit_key: str) -> boo
         return bool(result.rowcount)
 
 
+def _guess_dict(row: ModelGuess) -> dict[str, Any]:
+    return {"label": row.label, "confidence": row.confidence, "crops": row.crops,
+            "model_seq": row.model_seq, "input_rev": row.input_rev,
+            "scored_at": row.scored_at}
+
+
+async def guesses_for(store: EventStore, device_id: int,
+                      visit_keys: list[str] | None = None) -> dict[str, dict[str, Any]]:
+    """`visit_key -> stored model answer` for one device, optionally only some keys."""
+    stmt = select(ModelGuess).where(ModelGuess.device_id == device_id)
+    async with store._read() as session:
+        if visit_keys is None:
+            return {r.visit_key: _guess_dict(r) for r in await session.scalars(stmt)}
+        out: dict[str, dict[str, Any]] = {}
+        for i in range(0, len(visit_keys), _IN_CHUNK):
+            chunk = visit_keys[i:i + _IN_CHUNK]
+            rows = await session.scalars(stmt.where(ModelGuess.visit_key.in_(chunk)))
+            out.update({r.visit_key: _guess_dict(r) for r in rows})
+        return out
+
+
+async def put_guess(store: EventStore, device_id: int, visit_key: str, answer: dict[str, Any],
+                    now: float | None = None) -> tuple[bool, dict[str, Any]]:
+    """Insert or replace one visit's model answer, unless the stored one is newer.
+
+    `answer` holds `label`, `confidence`, `crops`, `model_seq` and
+    `input_rev`. The sequence check runs inside the write, so two answers
+    racing for one visit cannot both win.
+
+    Returns:
+        `(stored, row)`: True and the new row, or False and the stored row
+        when that row's `model_seq` is greater than the answer's.
+    """
+    scored_at = now if now is not None else time.time()
+    async with store._write() as session:
+        row = await session.scalar(select(ModelGuess).where(
+            ModelGuess.device_id == device_id, ModelGuess.visit_key == visit_key))
+        if row is not None and row.model_seq > answer["model_seq"]:
+            return False, _guess_dict(row)
+        if row is None:
+            row = ModelGuess(device_id=device_id, visit_key=visit_key)
+            session.add(row)
+        row.label = answer["label"]
+        row.confidence = answer["confidence"]
+        row.crops = answer["crops"]
+        row.model_seq = answer["model_seq"]
+        row.input_rev = answer["input_rev"]
+        row.scored_at = scored_at
+        return True, _guess_dict(row)
+
+
+async def delete_guess(store: EventStore, device_id: int, visit_key: str) -> bool:
+    """Remove one visit's model answer; True if there was one."""
+    async with store._write() as session:
+        result = await session.execute(
+            delete(ModelGuess).where(ModelGuess.device_id == device_id,
+                                     ModelGuess.visit_key == visit_key),
+            execution_options={"synchronize_session": False})
+        return bool(result.rowcount)
+
+
 def _alert_dict(row: FountainAlert) -> dict[str, Any]:
     try:
         detail = json.loads(row.detail) if row.detail else {}
@@ -159,6 +222,20 @@ DEVICE_CLOCK_AHEAD_SEC = 86400
 _START_KEYS = ("event_start", "start_time", "mark")
 
 
+async def _attach_media(session: Any, rows: list[dict[str, Any]]) -> None:
+    """Give each row its `"media"` list, as `query_timeline` does."""
+    related = sorted({r["related_event"] for r in rows if r.get("related_event")})
+    media: dict[str, list[dict[str, Any]]] = {}
+    for i in range(0, len(related), _IN_CHUNK):
+        found = await session.scalars(
+            select(Media).where(Media.related_event.in_(related[i:i + _IN_CHUNK]))
+            .order_by(Media.created_at))
+        for m in found:
+            media.setdefault(m.related_event, []).append(m.as_dict())
+    for r in rows:
+        r["media"] = media.get(r.get("related_event") or "", [])
+
+
 async def linked_rows(store: EventStore, device_id: int,
                       keys: list[str]) -> list[dict[str, Any]]:
     """Visit-kind rows whose `related_event` or `parent_event` is in `keys`,
@@ -171,17 +248,36 @@ async def linked_rows(store: EventStore, device_id: int,
                 Event.device_id == device_id, Event.event_kind.in_(VISIT_KINDS),
                 or_(Event.related_event.in_(chunk), Event.parent_event.in_(chunk))))
             rows += [e.as_dict() for e in found]
-        related = sorted({r["related_event"] for r in rows if r.get("related_event")})
-        media: dict[str, list[dict[str, Any]]] = {}
-        for i in range(0, len(related), _IN_CHUNK):
-            found = await session.scalars(
-                select(Media).where(Media.related_event.in_(related[i:i + _IN_CHUNK]))
-                .order_by(Media.created_at))
-            for m in found:
-                media.setdefault(m.related_event, []).append(m.as_dict())
-    for r in rows:
-        r["media"] = media.get(r.get("related_event") or "", [])
+        await _attach_media(session, rows)
     return rows
+
+
+async def all_visit_rows(store: EventStore, device_id: int) -> list[dict[str, Any]]:
+    """Every visit-kind row of one device still in the store, with its media."""
+    async with store._read() as session:
+        found = await session.scalars(select(Event).where(
+            Event.device_id == device_id, Event.event_kind.in_(VISIT_KINDS)))
+        rows = [e.as_dict() for e in found]
+        await _attach_media(session, rows)
+    return rows
+
+
+async def visit_by_key(store: EventStore, device_id: int,
+                       visit_key: str) -> dict[str, Any] | None:
+    """The visit anchored at `visit_key`, rebuilt from its stored events.
+
+    Looked up around the start the anchor reports, not when it arrived, as
+    the day view does (see `visit_rows`). None when `visit_key` is not the
+    anchor of a visit still in the store.
+    """
+    own = await linked_rows(store, device_id, [visit_key])
+    anchor = next((v for v in build_visits(own) if v["visit_key"] == visit_key), None)
+    if anchor is None:
+        return None
+    ts = anchor["start_ts"]
+    rows = await visit_rows(store, device_id, ts - VISIT_WINDOW_SEC, ts + VISIT_WINDOW_SEC,
+                            VISIT_WINDOW_SEC)
+    return next((v for v in build_visits(rows) if v["visit_key"] == visit_key), None)
 
 
 def _may_start_in(lo: float, hi: float) -> ColumnElement[bool]:
