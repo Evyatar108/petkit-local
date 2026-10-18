@@ -237,6 +237,11 @@ async def handle_heartbeat(request: web.Request) -> web.Response:
     if device:
         device.last_heartbeat = time.time()
         device.online = True
+        # Runtime state is empty after a server restart. A camera may poll
+        # without a full state dump, but its observed peer still locates Live.
+        # This is connection metadata, not a fabricated sensor/state report.
+        if device.is_camera and not device.state.get("ip") and request.remote:
+            device.state["ip"] = request.remote
         note_iot_status(device, request)
 
         cmds = device.pop_commands()

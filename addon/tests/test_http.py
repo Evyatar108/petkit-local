@@ -241,6 +241,26 @@ async def test_heartbeat_delivers_queued_command():
         await client.close()
 
 
+async def test_heartbeat_recovers_camera_peer_after_server_restart_without_faking_state():
+    reg = DeviceRegistry()
+    client = await _client(reg)
+    try:
+        await client.post("/6/w7h/dev_signup", headers=HDR)
+        device = reg.get(100)
+        device.state.clear()
+        device.last_state_report = 0
+        response = await client.get("/6/poll/w7h/heartbeat", headers=HDR)
+        assert response.status == 200
+        assert device.state == {"ip": "127.0.0.1"}
+        assert device.last_state_report == 0
+        assert "content" not in (await response.json())["result"][0]
+        device.state["ip"] = "192.0.2.1"
+        await client.get("/6/poll/w7h/heartbeat", headers=HDR)
+        assert device.state["ip"] == "192.0.2.1"
+    finally:
+        await client.close()
+
+
 # --- what the device does with the answer ----------------------------------
 #
 # Every rule below was read out of `net_http_heartbeat` (D4SH 867) and its ARM
