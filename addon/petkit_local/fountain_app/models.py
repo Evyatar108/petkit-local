@@ -76,7 +76,11 @@ class ModelGuess(FountainBase):
     model_seq: Mapped[int] = mapped_column(Integer, nullable=False)
     input_rev: Mapped[str] = mapped_column(Text, nullable=False)
     scored_at: Mapped[float] = mapped_column(REAL, nullable=False)
-
+    #: The cats the model saw in the visit, a JSON list of pet ids as decimal
+    #: strings, beside the answer and never counted as one
+    #: (`decision:show-cats-seen`). Null from a job that does not send it, and
+    #: on rows stored before the column existed (`db.TableGuard` adds it).
+    seen: Mapped[str | None] = mapped_column(Text)
 
 class FountainAlert(FountainBase):
     """One alert, from the moment its condition held to the moment it ended.

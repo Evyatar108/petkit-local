@@ -449,6 +449,73 @@ async def test_the_labels_feed_keeps_labels_whose_events_were_pruned(tmp_path):
         await store.close()
 
 
+# --- the cats seen beside the answer (decision:show-cats-seen) ------------------
+
+
+async def test_the_cats_seen_are_stored_and_shown_beside_the_answer(tmp_path):
+    app, _reg, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    holly = await pets.create("Holly")
+    t0 = _noon()
+    await _seed(store, _drink(t0, rel="H", end=t0 + 40))
+    await _media(store, tmp_path, "H", "fullVideo", "Playback/h.mp4")
+    c = await _client(app)
+    url = "/api/fountain/visits/H/model-guess"
+    try:
+        rev = (await _work(c))["H"]["input_rev"]
+        r = await c.post(url, json=_answer(holly["id"], rev))      # a job without the field
+        assert r.status == 200
+        v = await _visit(c, "H")
+        assert (v["model_seen"], v["model_seen_names"]) == ([], [])
+        assert (await _work(c))["H"]["model_guess"]["seen"] is None
+
+        seen = [holly["id"], str(archie["id"]), holly["id"]]       # any order, repeats
+        r = await c.post(url, json={**_answer(holly["id"], rev), "seen": seen})
+        assert r.status == 200
+        assert (await r.json())["model_seen_names"] == ["Archie", "Holly"]
+        v = await _visit(c, "H")
+        assert (v["model_seen"], v["model_seen_names"]) == (
+            [archie["id"], holly["id"]], ["Archie", "Holly"])
+        assert (await _work(c))["H"]["model_guess"]["seen"] == [
+            str(archie["id"]), str(holly["id"])]
+        assert v["attributed"] == str(holly["id"])                 # credit is unchanged
+
+        for bad in ("1", [777], ["cat"], [True], [None], {"1": 1}):
+            r = await c.post(url, json={**_answer(holly["id"], rev), "seen": bad})
+            assert r.status == 400, bad
+    finally:
+        await c.close()
+        await store.close()
+
+
+async def test_an_answers_table_from_before_the_cats_seen_gains_the_column(tmp_path):
+    from sqlalchemy import text
+    _app, _reg, store, _pets = _panel(tmp_path)
+    await store._ensure_connected()
+    async with store._engine.begin() as conn:
+        await conn.execute(text(
+            "CREATE TABLE fountain_model_guesses (id INTEGER PRIMARY KEY,"
+            " device_id INTEGER NOT NULL, visit_key TEXT NOT NULL, label TEXT NOT NULL,"
+            " confidence REAL NOT NULL, crops INTEGER NOT NULL, model_seq INTEGER NOT NULL,"
+            " input_rev TEXT NOT NULL, scored_at REAL NOT NULL,"
+            " CONSTRAINT uq_fountain_model_guesses_visit UNIQUE (device_id, visit_key))"))
+        await conn.execute(text(
+            "INSERT INTO fountain_model_guesses (device_id, visit_key, label, confidence,"
+            " crops, model_seq, input_rev, scored_at) VALUES (:d, 'H', '2', 0.97, 38, 7,"
+            " 'rev', 1.0)"), {"d": FOUNTAIN})
+    try:
+        await db.TableGuard().ensure(store)
+        await db.TableGuard().ensure(store)                         # a second start-up
+        old = (await db.guesses_for(store, FOUNTAIN))["H"]
+        assert (old["label"], old["seen"]) == ("2", None)
+        saved, row = await db.put_guess(store, FOUNTAIN, "H", {
+            "label": "2", "confidence": 0.97, "crops": 38, "model_seq": 8,
+            "input_rev": "rev", "seen": ["1", "2"]})
+        assert saved and row["seen"] == ["1", "2"]
+    finally:
+        await store.close()
+
+
 # --- alerts and the switch -------------------------------------------------------
 
 

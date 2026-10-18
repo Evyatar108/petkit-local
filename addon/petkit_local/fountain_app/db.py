@@ -49,7 +49,20 @@ class TableGuard:
             async with store._write_lock:
                 async with store._engine.begin() as conn:
                     await conn.run_sync(FountainBase.metadata.create_all)
+                    await _add_missing_columns(conn)
             self._ready = True
+
+
+#: Columns added to an existing fountain table after it was first created:
+#: `create_all` makes missing tables only, never missing columns.
+_ADDED_COLUMNS = (("fountain_model_guesses", "seen", "TEXT"),)
+
+
+async def _add_missing_columns(conn: Any) -> None:
+    for table, column, kind in _ADDED_COLUMNS:
+        have = {row[1] for row in (await conn.exec_driver_sql(f"PRAGMA table_info({table})"))}
+        if column not in have:
+            await conn.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {kind}")
 
 
 async def labels_for(store: EventStore, device_id: int,
@@ -103,7 +116,8 @@ async def delete_label(store: EventStore, device_id: int, visit_key: str) -> boo
 def _guess_dict(row: ModelGuess) -> dict[str, Any]:
     return {"label": row.label, "confidence": row.confidence, "crops": row.crops,
             "model_seq": row.model_seq, "input_rev": row.input_rev,
-            "scored_at": row.scored_at}
+            "scored_at": row.scored_at,
+            "seen": json.loads(row.seen) if row.seen is not None else None}
 
 
 async def guesses_for(store: EventStore, device_id: int,
@@ -126,7 +140,8 @@ async def put_guess(store: EventStore, device_id: int, visit_key: str, answer: d
     """Insert or replace one visit's model answer, unless the stored one is newer.
 
     `answer` holds `label`, `confidence`, `crops`, `model_seq` and
-    `input_rev`. The sequence check runs inside the write, so two answers
+    `input_rev`, and optionally `seen` (pet ids as decimal strings). The
+    sequence check runs inside the write, so two answers
     racing for one visit cannot both win.
 
     Returns:
@@ -148,6 +163,8 @@ async def put_guess(store: EventStore, device_id: int, visit_key: str, answer: d
         row.model_seq = answer["model_seq"]
         row.input_rev = answer["input_rev"]
         row.scored_at = scored_at
+        seen = answer.get("seen")
+        row.seen = json.dumps(seen) if seen is not None else None
         return True, _guess_dict(row)
 
 

@@ -104,17 +104,22 @@ def label_fields(label: str | None, pets: dict[int, dict[str, Any]]) -> dict[str
 def model_fields(guess: dict[str, Any] | None,
                  pets: dict[int, dict[str, Any]]) -> dict[str, Any]:
     """`{model_guess, model_guess_name, model_confidence, model_not_sure,
-    model_confident}` for one visit's stored model answer (or None)."""
+    model_confident, model_seen, model_seen_names}` for one visit's stored
+    model answer (or None). `model_seen` lists the cats the model saw, for
+    display only (`decision:show-cats-seen`)."""
     pet_id = stats.model_pet(guess)
     name = None
     if pet_id is not None:
         name = _pet_fields(pets, pet_id)["pet_name"] or f"pet {pet_id}"
+    seen = [int(p) for p in ((guess or {}).get("seen") or [])]
     return {
         "model_guess": pet_id,
         "model_guess_name": name,
         "model_confidence": guess["confidence"] if guess else None,
         "model_not_sure": bool(guess) and guess["label"] == ANSWER_NOT_SURE,
         "model_confident": stats.model_confident(guess),
+        "model_seen": seen,
+        "model_seen_names": [_pet_fields(pets, p)["pet_name"] or f"pet {p}" for p in seen],
     }
 
 

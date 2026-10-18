@@ -281,7 +281,7 @@ async def test_newer_emergency_replaces_older_normal_attribution_for_alerts_only
         assert any(r["subject"] == f"pet:{holly['id']}"
                    and r["kind"] == pre_alert.KIND_UNVALIDATED for r in active)
         assert (await db.guesses_for(store, FOUNTAIN))["new"] == {
-            **ordinary, "scored_at": now[0]}
+            **ordinary, "scored_at": now[0], "seen": None}
     finally:
         await c.close()
         await store.close()

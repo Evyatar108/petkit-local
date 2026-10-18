@@ -131,7 +131,8 @@ async def api_fountain_model_work(request: web.Request) -> web.Response:
     `start_ts`, `readiness`, `input_rev`, `episodes` (`kind`,
     `related_event`, `start_ts`, `state`, `source`, `path` relative to the
     media root), `label`, and `model_guess`: the stored answer (`label`,
-    `confidence`, `crops`, `model_seq`, `input_rev`, `scored_at`) or null.
+    `confidence`, `crops`, `model_seq`, `input_rev`, `scored_at`, `seen`) or
+    null.
     """
     store = _store(request)
     dev = _device(request.app, request.query.get("device"))
@@ -204,15 +205,33 @@ def _answer(body: dict[str, Any], pets: dict[int, Any]) -> dict[str, Any]:
     if not isinstance(input_rev, str) or not input_rev:
         raise _refuse(web.HTTPBadRequest, "input_rev must be a non-empty string")
     return {"label": label, "confidence": float(confidence), "crops": crops,
-            "model_seq": model_seq, "input_rev": input_rev}
+            "model_seq": model_seq, "input_rev": input_rev,
+            "seen": _seen(body.get("seen"), pets)}
+
+
+def _seen(raw: Any, pets: dict[int, Any]) -> list[str] | None:
+    """The optional cats the model saw: registered pet ids, sorted, each once."""
+    if raw is None:
+        return None
+    if not isinstance(raw, list):
+        raise _refuse(web.HTTPBadRequest, "seen must be a list of pet ids")
+    out = set()
+    for item in raw:
+        text = str(item).strip() if isinstance(item, (str, int)) and not isinstance(item, bool) \
+            else ""
+        if not text.isdigit() or int(text) not in pets:
+            raise _refuse(web.HTTPBadRequest, "seen must be a list of registered pet ids")
+        out.add(int(text))
+    return [str(p) for p in sorted(out)]
 
 
 async def api_fountain_model_guess(request: web.Request) -> web.Response:
     """Store or remove the cat-ID model's answer for one visit.
 
     `POST /api/fountain/visits/{visit_key}/model-guess` with `{"device",
-    "label", "confidence", "crops", "model_seq", "input_rev"}`; `device`
-    defaults to the first W7H, `label` is a registered pet's id or
+    "label", "confidence", "crops", "model_seq", "input_rev"}` and optionally
+    `"seen"`, the pet ids of the cats the model saw (`decision:show-cats-seen`);
+    `device` defaults to the first W7H, `label` is a registered pet's id or
     `"not_sure"`. Answers 200 `{ok, visit_key, stored, ...model fields}`
         (`stored` is the saved row, the model fields as on a visit); 409 `{error, reason, input_rev, readiness, stored}` when
     `reason` is `stale_input` (the visit's footage is not the answer's, or
