@@ -12,6 +12,10 @@ shows the active ones as a banner.
   judged until the store holds fountain events from before the threshold
   window, so a fresh install or a new fountain does not alert on every cat
   at once.
+  With recent unidentified drinking and model attribution enabled, an urgent
+  request can defer a new warning for at most ten minutes. Its separate,
+  current emergency evidence may clear only the warning; unvalidated evidence
+  is displayed as such and never changes normal guesses or graph attribution.
 * **Tanks**: the latest W7H `error_start` naming `tankCL` (clean tank low) or
   `tankDF` (waste tank full) with no later `error_over` for it
   (`claim:tank-alerts-from-error-events`), however far back it lies. A tank
@@ -32,6 +36,7 @@ from aiohttp import web
 
 from petkit_local.events import codes
 from petkit_local.fountain_app import db
+from petkit_local.fountain_app import pre_alert
 from petkit_local.fountain_app.api import _store, fountains, visits_between
 from petkit_local.fountain_app.settings import SettingsError, settings_of, update_settings
 from petkit_local.fountain_app.state import state_of
@@ -168,6 +173,24 @@ async def _attributed_drinkers(store, device_ids: list[int], start: float,
     return sorted(found, reverse=True)
 
 
+async def _drinking_records(store, device_ids: list[int], start: float,
+                            end: float, use_model: bool) -> list[dict]:
+    found = []
+    for did in device_ids:
+        visits = await visits_between(store, did, start, end)
+        keys = [v["visit_key"] for v in visits]
+        labels = await db.labels_for(store, did, keys)
+        guesses = await db.guesses_for(store, did, keys)
+        for visit in visits:
+            if visit["has_drinking"]:
+                label, guess = labels.get(visit["visit_key"]), guesses.get(visit["visit_key"])
+                found.append({
+                    "device_id": did, "visit": visit, "label": label, "guess": guess,
+                    "attributed": attributed(visit, label, guess, use_model),
+                })
+    return sorted(found, key=lambda r: r["visit"]["start_ts"], reverse=True)
+
+
 async def _has_history_before(store, device_ids: list[int], ts: float) -> bool:
     for did in device_ids:
         if await store.query_timeline(device_id=did, end_ts=ts, limit=1):
@@ -177,35 +200,70 @@ async def _has_history_before(store, device_ids: list[int], ts: float) -> bool:
 
 async def _no_drink_alerts(store, device_ids: list[int], pets: dict[int, str | None],
                            hours: float, now: float, active: set[str],
-                           use_model: bool) -> dict[str, tuple[str, dict[str, Any]]]:
+                           use_model: bool, *, media_root: str = "",
+                           waiting: set[str] | None = None, wake=None
+                           ) -> dict[str, tuple[str, dict[str, Any]]]:
     since = now - hours * 3600
     if not pets or not device_ids or not await _has_history_before(store, device_ids, since):
         return {}
-    drank = {key for _, key in await _attributed_drinkers(store, device_ids, since, now + 1,
-                                                          use_model)}
+    records = await _drinking_records(
+        store, device_ids, since - LAST_DRINK_LOOKBACK_SEC, now + 1, use_model)
+    recent = [r for r in records if r["visit"]["start_ts"] >= since]
+    drank = {r["attributed"] for r in recent}
+    emergency = await pre_alert.current_evidence(store, records, media_root, now) if use_model else {}
+    unresolved = [r for r in recent if r["attributed"] == "unknown"]
+    candidates = [r for r in unresolved if r["label"] is None]
     out: dict[str, tuple[str, dict[str, Any]]] = {}
-    older: list[tuple[float, str]] | None = None
     for pid, name in sorted(pets.items()):
         if str(pid) in drank:
             continue
         subject = f"pet:{pid}"
-        last = None
-        if subject not in active:
-            # Only for a new alert: an active one keeps the detail it was raised with.
-            if older is None:
-                older = await _attributed_drinkers(
-                    store, device_ids, since - LAST_DRINK_LOOKBACK_SEC, since, use_model)
-            last = next((ts for ts, key in older if key == str(pid)), None)
         label = name or f"pet {pid}"
-        out[subject] = (KIND_NO_DRINK, {
+        evidence = emergency.get(pid)
+        if evidence and evidence["start_ts"] >= since:
+            if not evidence["validation_passed"]:
+                out[subject] = (pre_alert.KIND_UNVALIDATED, {
+                    "pet_id": pid, "pet_name": name, "hours": hours,
+                    "last_drink_ts": evidence["start_ts"],
+                    "unvalidated": True, "visit_key": evidence["visit_key"],
+                    "message": f"An unvalidated model identified a recent drink as {label}. "
+                               "The no-drink warning was cleared. Review the drink's label.",
+                })
+            continue
+        last = next((r["visit"]["start_ts"] for r in records
+                     if r["attributed"] == str(pid)), None)
+        if evidence:
+            last = max(last or 0, evidence["start_ts"])
+        if use_model and candidates:
+            scope = {
+                "start_ts": since, "device_ids": device_ids,
+                "visits": [{"device_id": r["device_id"], "visit_key": r["visit"]["visit_key"]}
+                           for r in candidates],
+            }
+            request = await db.ensure_pre_alert(
+                store, pre_alert.episode_key(pid, hours, last), pid, scope, now,
+                pre_alert.WAIT_SEC)
+            if request["result"] is None and now < request["deadline"]:
+                if waiting is not None:
+                    waiting.add(subject)
+                if wake is not None and request["created"]:
+                    wake.set()
+                continue
+        uncertain = use_model and bool(unresolved)
+        message = (
+            f"No identified drink for {label} in {hours:g} hours. Recent drinks remain "
+            "unidentified; classification could not confirm them."
+            if uncertain else f"{label} has not drunk from the fountain in {hours:g} hours")
+        out[subject] = (pre_alert.KIND_UNCONFIRMED if uncertain else KIND_NO_DRINK, {
             "pet_id": pid, "pet_name": name, "hours": hours, "last_drink_ts": last,
-            "message": f"{label} has not drunk from the fountain in {hours:g} hours"})
+            "message": message})
     return out
 
 
 async def check(store, device_ids: list[int], pets: dict[int, str | None], hub,
                 no_drink_hours: float, now: float | None = None,
-                use_model_answers: bool = True) -> dict[str, list]:
+                use_model_answers: bool = True, *, media_root: str = "", wake=None
+                ) -> dict[str, list]:
     """Raise and clear alerts so the table matches the conditions at `now`.
 
     Args:
@@ -226,18 +284,27 @@ async def check(store, device_ids: list[int], pets: dict[int, str | None], hub,
         wanted.update(tank_wanted)
         unknown |= tank_unknown
     wanted.update(await _no_drink_alerts(store, device_ids, pets, no_drink_hours, now,
-                                         set(active), use_model_answers))
+                                         set(active), use_model_answers,
+                                         media_root=media_root, waiting=unknown, wake=wake))
 
     raised, cleared = [], []
     for subject, (kind, detail) in wanted.items():
         if subject in active:
-            continue
+            previous = active[subject]
+            if previous["kind"] == kind:
+                continue
+            await db.clear_alert(store, previous["id"], now)
+            previous = {**previous, "cleared_at": now}
+            cleared.append(previous)
+            if hub is not None:
+                hub.publish(HUB_KIND, previous["detail"].get("device_id"),
+                            "Cleared: " + previous["detail"].get("message", subject), previous)
         alert = await db.raise_alert(store, kind, subject, detail, now)
         raised.append(alert)
         if hub is not None:
             hub.publish(HUB_KIND, detail.get("device_id"), detail["message"], alert)
     for subject, alert in active.items():
-        if subject in wanted or subject in unknown:
+        if subject in wanted or (subject in unknown and alert["kind"] != pre_alert.KIND_UNVALIDATED):
             continue
         await db.clear_alert(store, alert["id"], now)
         alert = {**alert, "cleared_at": now}
@@ -265,17 +332,32 @@ async def check_app(app: web.Application, now: float | None = None) -> dict[str,
         settings = settings_of(app)
         return await check(store, [d.petkit_id for d in fountains(app)],
                            {p["id"]: p.get("name") for p in pets}, app.get("hub"),
-                           settings["no_drink_hours"], now, settings["use_model_answers"])
+                           settings["no_drink_hours"], now, settings["use_model_answers"],
+                           media_root=app["cfg"].get("media_root", ""), wake=state.alert_wake)
 
 
 async def alert_loop(app: web.Application) -> None:
-    """The periodic check. Waits one interval first, so start-up stays quick."""
+    """Periodic reconciliation plus exact request deadlines and creation wakeups."""
+    state = state_of(app)
     while True:
-        await asyncio.sleep(CHECK_INTERVAL_SEC)
+        state.alert_wake.clear()
         try:
             await check_app(app)
         except Exception:
             log.exception("fountain app: alert check failed")
+        delay = CHECK_INTERVAL_SEC
+        store = app.get("event_store")
+        if store is not None:
+            try:
+                deadline = await pre_alert.pending_deadline(store, time.time())
+                if deadline is not None:
+                    delay = min(delay, max(0, deadline - time.time()))
+            except Exception:
+                log.exception("fountain app: could not read urgent deadline")
+        try:
+            await asyncio.wait_for(state.alert_wake.wait(), timeout=delay)
+        except TimeoutError:
+            pass
 
 
 # --- handlers ---------------------------------------------------------------

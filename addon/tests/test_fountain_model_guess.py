@@ -463,8 +463,9 @@ async def _alert_scene(store, tmp_path, archie, now) -> None:
     await _media(store, tmp_path, "X", "fullVideo", "Playback/x.mp4")
 
 
-async def test_a_confident_answer_clears_the_no_drink_alert(tmp_path):
+async def test_a_confident_answer_clears_the_no_drink_alert(tmp_path, monkeypatch):
     """The running example: Holly's unnamed drink, answered "Holly" at 0.97."""
+    monkeypatch.setattr(alerts.pre_alert, "WAIT_SEC", 0)
     app, _reg, store, pets = _panel(tmp_path)
     archie = await pets.create("Archie")
     holly = await pets.create("Holly")

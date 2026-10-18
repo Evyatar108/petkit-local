@@ -95,3 +95,22 @@ class FountainAlert(FountainBase):
     started_at: Mapped[float] = mapped_column(REAL, nullable=False)
     cleared_at: Mapped[float | None] = mapped_column(REAL)
     detail: Mapped[str | None] = mapped_column(Text)
+
+
+class PreAlertCheck(FountainBase):
+    """One durable, bounded classification attempt for a pet's no-drink gap.
+
+    Result assessments are alert evidence only, never labels or normal guesses.
+    """
+
+    __tablename__ = "fountain_pre_alert_checks"
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    episode_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
+    pet_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    created_at: Mapped[float] = mapped_column(REAL, nullable=False)
+    deadline: Mapped[float] = mapped_column(REAL, nullable=False)
+    scope: Mapped[str] = mapped_column(Text, nullable=False)
+    completed_at: Mapped[float | None] = mapped_column(REAL)
+    model_seq: Mapped[int | None] = mapped_column(Integer)
+    result: Mapped[str | None] = mapped_column(Text)

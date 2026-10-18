@@ -25,6 +25,7 @@ from petkit_local.fountain_app.api import (
 from petkit_local.fountain_app.model_guess import (
     api_fountain_labels, api_fountain_model_guess, api_fountain_model_work,
 )
+from petkit_local.fountain_app.pre_alert import api_alert_checks, api_alert_result
 from petkit_local.fountain_app.state import FOUNTAIN_APP, FountainState, state_of
 from petkit_local.fountain_app.status import api_fountain_status
 
@@ -46,8 +47,8 @@ async def _create_tables(app: web.Application) -> None:
 async def _start_alerts(app: web.Application) -> None:
     """Start-up hook: run the alert check in the background.
 
-    Registered after `_create_tables`, and the loop waits one interval before
-    its first check. The task joins the panel's background set, which the
+    Registered after `_create_tables`; the loop checks immediately so overdue
+    persisted requests are not delayed again. It joins the background set, which the
     panel's cleanup cancels and drains.
     """
     if app.get("event_store") is None:
@@ -69,6 +70,8 @@ def register(app: web.Application) -> None:
     app.router.add_delete("/api/fountain/visits/{visit_key}/model-guess",
                           api_fountain_model_guess)
     app.router.add_get("/api/fountain/model/work", api_fountain_model_work)
+    app.router.add_get("/api/fountain/model/alert-checks", api_alert_checks)
+    app.router.add_post("/api/fountain/model/alert-checks/{request_id}", api_alert_result)
     app.router.add_get("/api/fountain/labels", api_fountain_labels)
     app.router.add_get("/api/fountain/stats", api_fountain_stats)
     app.router.add_post("/api/fountain/export", api_fountain_export)

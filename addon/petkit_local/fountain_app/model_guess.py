@@ -151,6 +151,7 @@ async def api_fountain_model_work(request: web.Request) -> web.Response:
 
     visits = await asyncio.to_thread(build)
     return web.json_response({"device": _device_summary(dev), "generated_at": now,
+                              "model_sequence_watermark": await db.model_sequence_watermark(store),
                               "visits": visits})
 
 

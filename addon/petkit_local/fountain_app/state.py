@@ -23,6 +23,8 @@ class FountainState:
     export_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Serializes alert checks (the periodic task and a settings change).
     alert_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    #: Request creation wakes an alert loop sleeping beyond the new deadline.
+    alert_wake: asyncio.Event = field(default_factory=asyncio.Event)
     #: Serializes settings writes, so two partial changes cannot lose one another.
     settings_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     #: Held across a model answer's revision check and write (`model_guess.py`).

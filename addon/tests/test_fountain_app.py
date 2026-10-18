@@ -654,11 +654,12 @@ async def test_an_alert_whose_start_is_out_of_reach_is_not_cleared(tmp_path, mon
         await store.close()
 
 
-async def test_a_label_change_rechecks_the_alerts_before_answering(tmp_path):
+async def test_a_label_change_rechecks_the_alerts_before_answering(tmp_path, monkeypatch):
     """Phone repro 2026-10-15: Holly's unrecognized drink was labeled, but the app's
     refresh right after the save still showed her no-drink alert, because alerts were
     only re-checked by the 60-second task."""
     from petkit_local.fountain_app import alerts
+    monkeypatch.setattr(alerts.pre_alert, "WAIT_SEC", 0)
 
     app, _reg, store, pets = _panel(tmp_path)
     archie = await pets.create("Archie")

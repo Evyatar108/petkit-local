@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+import uuid
 from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import REAL, ColumnElement, and_, case, cast, delete, func, or_, select, update
@@ -20,7 +21,7 @@ from sqlalchemy import REAL, ColumnElement, and_, case, cast, delete, func, or_,
 from petkit_local.events import codes
 from petkit_local.events.models import Event, Media
 from petkit_local.fountain_app.models import (
-    FountainAlert, FountainBase, ModelGuess, VisitLabel,
+    FountainAlert, FountainBase, ModelGuess, PreAlertCheck, VisitLabel,
 )
 from petkit_local.fountain_app.visits import VISIT_WINDOW_SEC, build_visits, reported_start
 
@@ -206,6 +207,61 @@ async def clear_alert(store: EventStore, alert_id: int, now: float) -> None:
             update(FountainAlert).where(FountainAlert.id == alert_id)
             .values(cleared_at=now),
             execution_options={"synchronize_session": False})
+
+
+def _pre_alert_dict(row: PreAlertCheck) -> dict[str, Any]:
+    return {
+        "id": row.id, "episode_key": row.episode_key, "pet_id": row.pet_id,
+        "created_at": row.created_at, "deadline": row.deadline,
+        "scope": json.loads(row.scope), "completed_at": row.completed_at,
+        "model_seq": row.model_seq, "result": json.loads(row.result) if row.result else None,
+    }
+
+
+async def pre_alert_checks(store: EventStore) -> list[dict[str, Any]]:
+    async with store._read() as session:
+        return [_pre_alert_dict(row) for row in await session.scalars(select(PreAlertCheck))]
+
+
+async def ensure_pre_alert(store: EventStore, episode_key: str, pet_id: int,
+                           scope: dict[str, Any], now: float, wait: float) -> dict[str, Any]:
+    """One write owner and a non-null unique episode key preserve the first deadline."""
+    async with store._write() as session:
+        row = await session.scalar(select(PreAlertCheck).where(
+            PreAlertCheck.episode_key == episode_key))
+        created = row is None
+        if row is None:
+            row = PreAlertCheck(
+                id=uuid.uuid4().hex, episode_key=episode_key, pet_id=pet_id,
+                created_at=now, deadline=now + wait, scope=json.dumps(scope))
+            session.add(row)
+            await session.flush()
+        return {**_pre_alert_dict(row), "created": created}
+
+
+async def complete_pre_alert(store: EventStore, request_id: str,
+                             result: dict[str, Any], now: float) -> tuple[bool, str]:
+    """Idempotent result completion; immutable result and deadline after first success."""
+    async with store._write() as session:
+        row = await session.get(PreAlertCheck, request_id)
+        if row is None:
+            return False, "unknown request"
+        if row.result is not None:
+            return (json.loads(row.result) == result, "result already completed")
+        if now >= row.deadline:
+            return False, "request expired"
+        row.result = json.dumps(result, sort_keys=True)
+        row.model_seq = result["model_seq"]
+        row.completed_at = now
+        return True, ""
+
+
+async def model_sequence_watermark(store: EventStore) -> int:
+    """All retained server model identities, even if their events were pruned."""
+    async with store._read() as session:
+        ordinary = await session.scalar(select(func.max(ModelGuess.model_seq)))
+        emergency = await session.scalar(select(func.max(PreAlertCheck.model_seq)))
+        return max(ordinary or 0, emergency or 0)
 
 # --- upstream events, read for visits and alerts ------------------------------
 
