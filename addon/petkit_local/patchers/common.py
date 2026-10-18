@@ -474,31 +474,19 @@ WRAPPER_FOOTER = """\
 # Each is a tuple (patcher_id, shell_lines).
 # Only active patchers are included in the generated wrapper.
 #
-# /app/bin/watchdog supervises media, cloud, agora and logUpload. Its liveness
-# test is `lsof |grep /app/bin/<name> |wc -l`, and busybox lsof prints
-# `PID <TAB> /proc/PID/exe <TAB> <fd target>` — so it matches on the process's
-# EXECUTABLE PATH, not on an open descriptor. Two consequences:
+# Camera bind-mounts the real tserver ELF over agora, not a shell placeholder.
+# It starts through stock app_start.sh and /proc/PID/exe names /app/bin/agora.
+# This preserves the name used by the stock watchdog's kill/restart commands.
 #
-#   * bind-mounting a replacement ELF is invisible to it: exec'ing the
-#     mountpoint gives /proc/PID/exe == the mountpoint path. Confirmed live —
-#     /system/cloud_patched running as /app/bin/cloud reports /app/bin/cloud.
-#   * a shell script can never satisfy it. The kernel execs the interpreter,
-#     so /proc/PID/exe is /bin/busybox whatever the script is called. A dummy
-#     `while true; do sleep 3600; done` over /app/bin/agora reads as dead on
-#     every check, and the watchdog respawns it forever.
-#
-# Hence camera bind-mounts the real tserver binary over agora rather than a
-# placeholder: exec'ing ./agora starts the local streamer, the lsof check
-# passes, and the watchdog now supervises tserver for us.
-#
-# On the W7H fountain (firmware 456) that is not enough. Its watchdog, read in
+# On the W7H fountain (firmware 456), process identity alone is not enough.
+# Its watchdog, read in
 # Ghidra and confirmed on the live device, keeps one counter per supervised
 # process in the POSIX shm /config_shm, adds 1 to each every 2 s, and once a
 # counter passes 29 runs `killall -9 <name>` and restarts it: about every 60 s.
 # A stock process checks in by writing 0 to its own counter (logUpload's
 # logUpload_feed_dog does it every 3 s). tserver never writes agora's, so the
 # watchdog killed it every minute and every viewer's stream dropped. There the
-# lsof line is a leak check instead: run hourly, it kills a process only when
+# lsof line is a file-descriptor leak check: run hourly, it kills a process only when
 # more than 511 lines match. So on that watchdog build the camera block below
 # also checks in for agora, see AGORA_CHECKIN_*.
 
@@ -514,21 +502,41 @@ AGORA_CHECKIN_WATCHDOG_MD5 = (
 )
 #: The watchdog kills after 30 ticks of 2 s; logUpload checks in every 3 s.
 AGORA_CHECKIN_PERIOD_S = 5
+#: tserver's RSS grew from 4.8 to 8.4 MB during longer uptime. Three controlled
+#: reconnects added a frame-buffer mapping and 60-64 kB anonymous RSS each.
+#: Total RSS includes repeated mappings of the same shared pages; it is not
+#: an equivalent loss of physical RAM. A fresh tserver holds about 2.4 MB.
+#: Past this threshold, and only while no stream connection is open, the loop
+#: skips its check-in so the watchdog reclaims the retained resources.
+AGORA_RECYCLE_RSS_KB = 12288
+#: tserver's port, as /proc/net/tcp prints it (hex). State 01 is established.
+AGORA_STREAM_PORT_HEX = f"{80:04X}"
 
 # The check-in runs only while a process named agora exists, so a tserver that
 # died is still restarted by the watchdog within a minute. It cannot see a
-# tserver that runs but hangs. No backslash or % here: the wrapper reaches the
-# device as a printf format string (build_wrapper_upload_cmd).
+# tserver that runs but hangs. No backslash, % or brace here: the camera block
+# goes through str.format(store=...), and the wrapper reaches the device as a
+# printf format string (build_wrapper_upload_cmd).
 AGORA_CHECKIN_BLOCK = (
     "# Check in for agora with the W7H watchdog, which otherwise kills tserver\n"
     "# every 60 s. Only on the watchdog build whose counters were read.\n"
     'case "$(md5sum /app/bin/watchdog 2>/dev/null)" in\n'
     "  " + "|".join(f"{md5}*" for md5 in AGORA_CHECKIN_WATCHDOG_MD5) + ")\n"
     "    ( while true; do\n"
-    f'        if [ "$(wc -c 2>/dev/null < {AGORA_CHECKIN_SHM})" = '
-    f"{AGORA_CHECKIN_SHM_BYTES} ] && pidof agora >/dev/null; then\n"
-    f"          dd if=/dev/zero of={AGORA_CHECKIN_SHM} bs=4 "
+    "        p=$(pidof agora)\n"
+    f'        if [ -n "$p" ] && [ "$(wc -c 2>/dev/null < {AGORA_CHECKIN_SHM})" = '
+    f"{AGORA_CHECKIN_SHM_BYTES} ]; then\n"
+    "          kb=$(grep VmRSS /proc/$p/status 2>/dev/null | tr -dc 0-9)\n"
+    f'          grep -q ":{AGORA_STREAM_PORT_HEX} [0-9A-F]*:[0-9A-F]* 01 " '
+    "/proc/net/tcp 2>/dev/null\n"
+    "          viewers=$?\n"
+    f'          if [ -n "$kb" ] && [ "$kb" -gt {AGORA_RECYCLE_RSS_KB} ] '
+    '&& [ "$viewers" = 1 ]; then\n'
+    "            : # above the limit and confirmed idle: let the watchdog restart it\n"
+    "          else\n"
+    f"            dd if=/dev/zero of={AGORA_CHECKIN_SHM} bs=4 "
     f"seek={AGORA_CHECKIN_OFFSET // 4} count=1 conv=notrunc 2>/dev/null\n"
+    "          fi\n"
     "        fi\n"
     f"        sleep {AGORA_CHECKIN_PERIOD_S}\n"
     "      done ) &\n"

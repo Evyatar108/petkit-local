@@ -96,8 +96,8 @@ PATCHER_INFO = {
         "go2rtc exists here to stand between the two, and it also spares "
         "the device a connection per viewer by keeping just one open.\n\n"
         "What it does: bind-mounts /app/bin/tserver over /app/bin/agora, so the "
-        "stock startup line './agora &' launches the local streamer. No file is "
-        "written to the device - removing the patch and rebooting restores "
+        "stock startup line './agora &' launches the local streamer. Only the "
+        "boot wrapper changes; removing the patch and rebooting restores "
         "Agora exactly.\n\n"
         "The firmware watchdog: every stock process checks in with it by "
         "calling its own *_feed_dog; tserver is a different binary and never "
@@ -106,8 +106,12 @@ PATCHER_INFO = {
         "the kill never lands, tserver keeps the same PID, its memory stays "
         "flat and the device does not reboot. On a W7H fountain (firmware 456) "
         "the kill does land and the stream dropped every minute, so there the "
-        "patch also checks in for Agora from the boot script; tserver then "
-        "keeps running.\n\n"
+        "patch also checks in for Agora from the boot script. This is enabled "
+        "only for the verified watchdog binary and shared-memory layout. "
+        "If tserver grows past 12 MB RSS, check-ins pause while no stream "
+        "connection is open so the watchdog can reclaim its memory. An "
+        "established viewer keeps check-ins active; a viewer arriving during "
+        "an idle restart may need to retry.\n\n"
         "The PetKit app's live view will stop working - use the RTSP URL above "
         "instead.\n\n"
         "One rough edge: the device needs a few seconds between connections, so "
@@ -115,8 +119,8 @@ PATCHER_INFO = {
         "Waiting a moment and retrying works, and normal viewing does not hit "
         "it."
     ),
-    # Pure bind-mount: no file of ours lands on the device, so removal is just
-    # dropping the lines from the wrapper and rebooting.
+    # No extra helper file; removal drops the camera block, including its
+    # check-in loop, from the wrapper and takes effect after reboot.
     "files": [],
     # No architecture: this bind-mounts one binary the device already ships
     # over another. Both are whatever the device was built with.
