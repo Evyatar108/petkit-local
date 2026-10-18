@@ -57,6 +57,69 @@ async def test_one_deadline_survives_rechecks_and_table_guard_restart(tmp_path, 
         await store.close()
 
 
+async def test_invalidating_historical_anchor_does_not_restart_first_deadline(tmp_path, monkeypatch):
+    clock = [time.time()]
+    monkeypatch.setattr(pre_alert.time, "time", lambda: clock[0])
+    app, _, store, pets = _panel(tmp_path)
+    archie = await pets.create("Archie")
+    await _seed(store,
+                _drink(clock[0] - 13 * 3600, rel="historic", end=clock[0] - 13 * 3600 + 30,
+                       first_id=50)
+                + _drink(clock[0] - 600, rel="new", end=clock[0] - 560))
+    await _media(store, tmp_path, "historic", "fullVideo", "Playback/historic.mp4")
+    await _media(store, tmp_path, "new", "fullVideo", "Playback/new.mp4")
+    await state_of(app).tables.ensure(store)
+    historic = await db.visit_by_key(store, FOUNTAIN, "historic")
+    revision = pre_alert.visit_input(historic, str(tmp_path / "media"), clock[0])["input_rev"]
+    await db.put_guess(store, FOUNTAIN, "historic", {
+        "label": str(archie["id"]), "confidence": 1.0, "crops": 4,
+        "model_seq": 21, "input_rev": revision})
+    client = await _client(app)
+    try:
+        await alerts.check_app(app)
+        [original] = await db.pre_alert_checks(store)
+        clock[0] += 599
+        (tmp_path / "media" / "Playback" / "historic.mp4").write_bytes(b"changed historic footage")
+        await alerts.check_app(app)
+        [same] = await db.pre_alert_checks(store)
+        assert same["id"] == original["id"] and same["deadline"] == original["deadline"]
+        clock[0] += 1
+        await alerts.check_app(app)
+        assert any(a["subject"] == f"pet:{archie['id']}"
+                   and a["kind"] == pre_alert.KIND_UNCONFIRMED
+                   for a in await db.active_alerts(store))
+    finally:
+        await client.close()
+        await store.close()
+
+
+async def test_only_later_confirmed_drink_or_explicit_threshold_change_starts_new_gap(tmp_path):
+    app, _, store, _ = _panel(tmp_path)
+    await state_of(app).tables.ensure(store)
+    scope = {"visits": []}
+
+    async def ensure(anchor, hours=12, now=1000):
+        return await db.ensure_pre_alert(
+            store, pre_alert.episode_key(1, hours, anchor), 1, scope, now, 600,
+            anchor=anchor, hours=hours)
+
+    try:
+        first = await ensure(100)
+        assert (await ensure(None, now=1599))["id"] == first["id"]
+        assert (await ensure(90, now=1599))["deadline"] == first["deadline"]
+        assert (await ensure(100, now=1599))["id"] == first["id"]
+        later = await ensure(101, now=1600)
+        assert later["generation"] == 2 and later["deadline"] == 2200
+        repeated = await asyncio.gather(*(ensure(101, now=1600) for _ in range(5)))
+        assert all(row["id"] == later["id"] for row in repeated)
+        changed = await ensure(101, hours=24, now=1600)
+        restored = await ensure(101, hours=12, now=1600)
+        assert changed["generation"] == 3 and restored["generation"] == 4
+        assert len(await db.pre_alert_checks(store)) == 4
+    finally:
+        await store.close()
+
+
 async def test_failed_model_can_clear_only_its_alert_not_labels_or_graphs(tmp_path, monkeypatch):
     app, store, c, now, archie, holly, requests, rev = await scene(tmp_path, monkeypatch)
     try:

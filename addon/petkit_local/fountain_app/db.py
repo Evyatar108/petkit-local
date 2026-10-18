@@ -212,6 +212,7 @@ async def clear_alert(store: EventStore, alert_id: int, now: float) -> None:
 def _pre_alert_dict(row: PreAlertCheck) -> dict[str, Any]:
     return {
         "id": row.id, "episode_key": row.episode_key, "pet_id": row.pet_id,
+        "generation": row.generation, "hours": row.hours, "anchor_ts": row.anchor_ts,
         "created_at": row.created_at, "deadline": row.deadline,
         "scope": json.loads(row.scope), "completed_at": row.completed_at,
         "model_seq": row.model_seq, "result": json.loads(row.result) if row.result else None,
@@ -224,19 +225,30 @@ async def pre_alert_checks(store: EventStore) -> list[dict[str, Any]]:
 
 
 async def ensure_pre_alert(store: EventStore, episode_key: str, pet_id: int,
-                           scope: dict[str, Any], now: float, wait: float) -> dict[str, Any]:
-    """One write owner and a non-null unique episode key preserve the first deadline."""
+                           scope: dict[str, Any], now: float, wait: float, *,
+                           hours: float = 12, anchor: float | None = None) -> dict[str, Any]:
+    """Retain the gap until a later confirmed drink or threshold change.
+
+    Losing/invalidation of an old anchor cannot buy another ten minutes.
+    A persisted generation orders gaps even under equal timestamps.
+    """
     async with store._write() as session:
-        row = await session.scalar(select(PreAlertCheck).where(
-            PreAlertCheck.episode_key == episode_key))
-        created = row is None
-        if row is None:
-            row = PreAlertCheck(
-                id=uuid.uuid4().hex, episode_key=episode_key, pet_id=pet_id,
-                created_at=now, deadline=now + wait, scope=json.dumps(scope))
-            session.add(row)
-            await session.flush()
-        return {**_pre_alert_dict(row), "created": created}
+        latest = await session.scalar(
+            select(PreAlertCheck).where(PreAlertCheck.pet_id == pet_id)
+            .order_by(PreAlertCheck.generation.desc()).limit(1))
+        if latest is not None and hours == latest.hours:
+            later_drink = anchor is not None and (
+                latest.anchor_ts is None or anchor > latest.anchor_ts)
+            if not later_drink:
+                return {**_pre_alert_dict(latest), "created": False}
+        generation = latest.generation + 1 if latest is not None else 1
+        row = PreAlertCheck(
+            id=uuid.uuid4().hex, episode_key=f"{episode_key}:{generation}", pet_id=pet_id,
+            generation=generation, hours=hours, anchor_ts=anchor,
+            created_at=now, deadline=now + wait, scope=json.dumps(scope))
+        session.add(row)
+        await session.flush()
+        return {**_pre_alert_dict(row), "created": True}
 
 
 async def complete_pre_alert(store: EventStore, request_id: str,

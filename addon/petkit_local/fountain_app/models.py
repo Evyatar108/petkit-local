@@ -104,10 +104,16 @@ class PreAlertCheck(FountainBase):
     """
 
     __tablename__ = "fountain_pre_alert_checks"
+    __table_args__ = (
+        UniqueConstraint("pet_id", "generation", name="uq_pre_alert_pet_generation"),
+    )
 
     id: Mapped[str] = mapped_column(Text, primary_key=True)
     episode_key: Mapped[str] = mapped_column(Text, unique=True, nullable=False)
     pet_id: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    hours: Mapped[float] = mapped_column(REAL, nullable=False)
+    anchor_ts: Mapped[float | None] = mapped_column(REAL)
     created_at: Mapped[float] = mapped_column(REAL, nullable=False)
     deadline: Mapped[float] = mapped_column(REAL, nullable=False)
     scope: Mapped[str] = mapped_column(Text, nullable=False)

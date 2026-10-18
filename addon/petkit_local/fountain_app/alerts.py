@@ -247,7 +247,7 @@ async def _no_drink_alerts(store, device_ids: list[int], pets: dict[int, str | N
             }
             request = await db.ensure_pre_alert(
                 store, pre_alert.episode_key(pid, hours, last), pid, scope, now,
-                pre_alert.WAIT_SEC)
+                pre_alert.WAIT_SEC, hours=hours, anchor=last)
             if request["result"] is None and now < request["deadline"]:
                 if waiting is not None:
                     waiting.add(subject)

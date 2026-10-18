@@ -112,11 +112,20 @@ async def pending_deadline(store, reconciled_at: float) -> float | None:
     A follow-up check taken after expiry excludes that already-processed
     deadline, so a zero-delay recheck does not become a busy loop.
     """
+    latest = latest_requests(await db.pre_alert_checks(store))
     pending = [
-        row["deadline"] for row in await db.pre_alert_checks(store)
+        row["deadline"] for row in latest.values()
         if row["result"] is None and row["deadline"] > reconciled_at
     ]
     return min(pending, default=None)
+
+
+def latest_requests(rows: list[dict]) -> dict[int, dict]:
+    latest = {}
+    for row in rows:
+        if row["pet_id"] not in latest or row["generation"] > latest[row["pet_id"]]["generation"]:
+            latest[row["pet_id"]] = row
+    return latest
 
 
 async def api_alert_checks(request: web.Request) -> web.Response:
@@ -130,8 +139,10 @@ async def api_alert_checks(request: web.Request) -> web.Response:
     pets = await _pets_by_id(request)
     media_root = request.app["cfg"].get("media_root", "")
     rows = []
-    for row in await db.pre_alert_checks(store):
+    for row in latest_requests(await db.pre_alert_checks(store)).values():
         if row["result"] is not None or row["deadline"] <= now or row["pet_id"] not in pets:
+            continue
+        if row["hours"] != settings_of(request.app)["no_drink_hours"]:
             continue
         visits = []
         for scope in row["scope"]["visits"]:
@@ -196,7 +207,9 @@ async def api_alert_result(request: web.Request) -> web.Response:
         if row["result"] == result:
             return web.json_response({"ok": True, "repeated": True})
         now = time.time()
-        if row["result"] is not None or now >= row["deadline"]:
+        if (row["result"] is not None or now >= row["deadline"]
+                or row["generation"] != latest_requests(rows)[row["pet_id"]]["generation"]
+                or row["hours"] != settings_of(request.app)["no_drink_hours"]):
             raise _refuse(web.HTTPConflict, "alert check completed or expired")
         scope = {(v["device_id"], v["visit_key"]) for v in row["scope"]["visits"]}
         reduced = reduce_assessments(rows)
