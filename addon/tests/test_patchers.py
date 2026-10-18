@@ -2,6 +2,10 @@
 and the unified app_init.sh wrapper generator."""
 import json
 import os
+import re
+import subprocess
+
+import pytest
 
 from petkit_local.devices.base import Device
 from petkit_local.patchers.common import (
@@ -182,13 +186,165 @@ def test_wrapper_camera_only():
 
 
 def test_wrapper_camera_never_uses_a_shell_placeholder():
-    """The watchdog identifies processes by /proc/PID/exe, which for any script
-    is the interpreter — so a shell stand-in over /app/bin/agora always reads as
-    dead and gets respawned forever. Only a real ELF may be mounted there."""
+    """Keep the stock agora identity for the watchdog's kill/restart commands,
+    and run the streamer itself rather than a stand-in process."""
     w = generate_app_init_wrapper({"camera"})
     agora_mount = next(l for l in w.split("\n") if "mount --bind" in l and "agora" in l)
     assert not agora_mount.rstrip().endswith(".sh")
     assert "fake_daemon" not in w
+
+
+def test_wrapper_camera_checks_in_for_agora():
+    """The W7H watchdog adds 1 to a per-process counter in /config_shm every 2 s
+    and kills the process once it passes 29; a process checks in by writing 0
+    there. tserver never writes agora's, so the wrapper must, or the watchdog
+    kills the streamer and every viewer's stream drops once a minute."""
+    w = generate_app_init_wrapper({"camera"})
+    lines = w.split("\n")
+    write = next(l.strip() for l in lines if "of=/dev/shm/config_shm" in l)
+    assert write.startswith("dd if=/dev/zero ")
+    assert " bs=4 " in write and " count=1 " in write
+    assert int(re.search(r"seek=(\d+)", write).group(1)) * 4 == 0x30B4
+    # Without notrunc, dd truncates the file at the write and shrinks the shared
+    # memory under every firmware process that maps it.
+    assert "conv=notrunc" in write
+    # Stops while tserver is down, so the watchdog still restarts a crashed one.
+    assert "pidof agora" in w
+    # Writes only into the layout it was read from: that watchdog build, and
+    # the shared memory at the size it had.
+    assert "dda400d6df9b38f226fba9b7776921d8" in w
+    assert "= 15328 ]" in w
+    # Runs in the background and is started before the stock init.
+    write_idx = next(i for i, l in enumerate(lines) if "of=/dev/shm/config_shm" in l)
+    stock_idx = next(i for i, l in enumerate(lines)
+                     if l.strip().startswith(". /app/script/app_init.sh"))
+    assert write_idx < stock_idx
+    assert any(l.strip().startswith("done ) &") for l in lines[write_idx:stock_idx])
+
+
+def test_wrapper_checks_in_for_agora_only_with_camera():
+    w = generate_app_init_wrapper({"ssh", "talk", "mqtt", "cloud", "cacert"})
+    assert "config_shm" not in w
+
+
+def test_wrapper_camera_lets_the_watchdog_recycle_an_idle_bloated_tserver():
+    """tserver's observed RSS grows during long uptime. The loop pauses its
+    check-in, so the watchdog restarts
+    tserver, only when tserver's memory is past the limit AND no stream
+    connection is open: a viewer is never cut to free memory."""
+    w = generate_app_init_wrapper({"camera"})
+    lines = [l.strip() for l in w.split("\n")]
+    assert any("VmRSS" in l and "/proc/" in l for l in lines)
+    # tserver serves on port 80 (hex 0050 in /proc/net/tcp); state 01 is an
+    # established connection.
+    assert any(":0050 " in l and " 01 " in l and "/proc/net/tcp" in l for l in lines)
+    gate = next(l for l in lines if "-gt 12288" in l)
+    assert '"$viewers" = 1' in gate
+    # The write is the else branch of that gate: bloat with no viewer skips it.
+    write_idx = next(i for i, l in enumerate(lines) if "of=/dev/shm/config_shm" in l)
+    gate_idx = lines.index(gate)
+    assert gate_idx < write_idx
+    assert "else" in lines[gate_idx:write_idx]
+
+
+def test_wrapper_text_survives_the_printf_upload():
+    """build_wrapper_upload_cmd writes the wrapper with printf, which reads the
+    whole text as its FORMAT string: a backslash or % in any block would be
+    rewritten on the way to the device (printf turns a literal \\000 into a
+    NUL byte)."""
+    w = generate_app_init_wrapper({"ssh", "talk", "mqtt", "cloud", "cacert", "camera"})
+    assert "%" not in w
+    assert "\\" not in w
+
+
+def test_agora_checkin_block_has_no_format_braces():
+    """The camera block is run through str.format(store=...); a shell ${var}
+    in it would be read as a format field and break every wrapper."""
+    from petkit_local.patchers.common import AGORA_CHECKIN_BLOCK
+    assert "{" not in AGORA_CHECKIN_BLOCK and "}" not in AGORA_CHECKIN_BLOCK
+
+
+@pytest.mark.parametrize(
+    "rss,viewer,read_error,pid,size,known_watchdog,should_feed",
+    [
+        (2400, "none", False, "123", 15328, True, True),
+        (12288, "none", False, "123", 15328, True, True),
+        (13000, "none", False, "123", 15328, True, False),
+        (13000, "local", False, "123", 15328, True, True),
+        # An outbound HTTP connection is not a viewer of this camera.
+        (13000, "remote", False, "123", 15328, True, False),
+        # Unknown connection state must not recycle a possible viewer.
+        (13000, "none", True, "123", 15328, True, True),
+        (None, "none", False, "123", 15328, True, True),
+        (2400, "none", False, "", 15328, True, False),
+        (2400, "none", False, "123", 100, True, False),
+        (2400, "none", False, "123", 15328, False, False),
+    ],
+)
+def test_agora_checkin_shell_behavior(
+    tmp_path, rss, viewer, read_error, pid, size, known_watchdog, should_feed,
+):
+    """Execute the real generated shell block for one iteration, with only
+    firmware observations and the memory write replaced by fixtures."""
+    from petkit_local.patchers.common import AGORA_CHECKIN_BLOCK
+
+    shm = tmp_path / "config_shm"
+    shm.write_bytes(bytes(size))
+    tcp = tmp_path / "tcp"
+    tcp.write_text(
+        "  sl  local_address rem_address   st\n"
+        + {
+            "none": "   0: 00000000:0050 00000000:0000 0A \n",
+            "local": "   1: 0100007F:0050 0200007F:CAFE 01 \n",
+            "remote": "   2: 0100007F:CAFE 0200007F:0050 01 \n",
+        }[viewer]
+    )
+    writes = tmp_path / "writes"
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    stubs = {
+        "pidof": 'echo "$TEST_PID"',
+        "md5sum": 'echo "$TEST_WATCHDOG  /app/bin/watchdog"',
+        "dd": 'echo "$*" >> "$TEST_WRITES"',
+        "grep": (
+            'if [ "$1" = VmRSS ]; then\n'
+            '  [ -n "$TEST_RSS" ] || exit 1\n'
+            '  echo "VmRSS: $TEST_RSS kB"\n'
+            'else\n'
+            '  [ "$TEST_READ_ERROR" = 0 ] || exit 2\n'
+            '  exec /bin/grep "$@"\n'
+            'fi'
+        ),
+    }
+    for name, body in stubs.items():
+        path = commands / name
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+    block = (
+        AGORA_CHECKIN_BLOCK
+        .replace("/dev/shm/config_shm", str(shm))
+        .replace("/proc/net/tcp", str(tcp))
+        .replace("sleep 5", "exit 0")
+    )
+    result = subprocess.run(
+        ["sh", "-c", block + "\nwait\n"],
+        env={
+            **os.environ, "PATH": f"{commands}:/usr/bin:/bin",
+            "TEST_PID": pid, "TEST_RSS": "" if rss is None else str(rss),
+            "TEST_READ_ERROR": str(int(read_error)), "TEST_WRITES": str(writes),
+            "TEST_WATCHDOG": (
+                "dda400d6df9b38f226fba9b7776921d8" if known_watchdog else "unknown"
+            ),
+        },
+        capture_output=True, text=True, timeout=5,
+    )
+    assert result.returncode == 0, result.stderr
+    assert writes.exists() == should_feed
+    if should_feed:
+        assert writes.read_text().strip() == (
+            f"if=/dev/zero of={shm} bs=4 seek=3117 count=1 conv=notrunc"
+        )
+    assert shm.stat().st_size == size
 
 
 def test_wrapper_talk_only():
