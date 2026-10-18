@@ -490,6 +490,52 @@ WRAPPER_FOOTER = """\
 # Hence camera bind-mounts the real tserver binary over agora rather than a
 # placeholder: exec'ing ./agora starts the local streamer, the lsof check
 # passes, and the watchdog now supervises tserver for us.
+#
+# On the W7H fountain (firmware 456) that is not enough. Its watchdog, read in
+# Ghidra and confirmed on the live device, keeps one counter per supervised
+# process in the POSIX shm /config_shm, adds 1 to each every 2 s, and once a
+# counter passes 29 runs `killall -9 <name>` and restarts it: about every 60 s.
+# A stock process checks in by writing 0 to its own counter (logUpload's
+# logUpload_feed_dog does it every 3 s). tserver never writes agora's, so the
+# watchdog killed it every minute and every viewer's stream dropped. There the
+# lsof line is a leak check instead: run hourly, it kills a process only when
+# more than 511 lines match. So on that watchdog build the camera block below
+# also checks in for agora, see AGORA_CHECKIN_*.
+
+#: Where the W7H watchdog keeps agora's counter, and the size of that shared
+#: memory on the build it was read from. The loop writes only while both hold.
+AGORA_CHECKIN_SHM = "/dev/shm/config_shm"
+AGORA_CHECKIN_SHM_BYTES = 15328
+AGORA_CHECKIN_OFFSET = 0x30B4
+#: md5 of each /app/bin/watchdog build whose counter layout was confirmed.
+#: On any other build the loop never starts and the device behaves as before.
+AGORA_CHECKIN_WATCHDOG_MD5 = (
+    "dda400d6df9b38f226fba9b7776921d8",  # W7H, firmware 456
+)
+#: The watchdog kills after 30 ticks of 2 s; logUpload checks in every 3 s.
+AGORA_CHECKIN_PERIOD_S = 5
+
+# The check-in runs only while a process named agora exists, so a tserver that
+# died is still restarted by the watchdog within a minute. It cannot see a
+# tserver that runs but hangs. No backslash or % here: the wrapper reaches the
+# device as a printf format string (build_wrapper_upload_cmd).
+AGORA_CHECKIN_BLOCK = (
+    "# Check in for agora with the W7H watchdog, which otherwise kills tserver\n"
+    "# every 60 s. Only on the watchdog build whose counters were read.\n"
+    'case "$(md5sum /app/bin/watchdog 2>/dev/null)" in\n'
+    "  " + "|".join(f"{md5}*" for md5 in AGORA_CHECKIN_WATCHDOG_MD5) + ")\n"
+    "    ( while true; do\n"
+    f'        if [ "$(wc -c 2>/dev/null < {AGORA_CHECKIN_SHM})" = '
+    f"{AGORA_CHECKIN_SHM_BYTES} ] && pidof agora >/dev/null; then\n"
+    f"          dd if=/dev/zero of={AGORA_CHECKIN_SHM} bs=4 "
+    f"seek={AGORA_CHECKIN_OFFSET // 4} count=1 conv=notrunc 2>/dev/null\n"
+    "        fi\n"
+    f"        sleep {AGORA_CHECKIN_PERIOD_S}\n"
+    "      done ) &\n"
+    "    ;;\n"
+    "esac\n"
+)
+
 BIND_MOUNT_TEMPLATES = {
     "mqtt": (
         "# MQTT TLS bypass: patched ctrl accepts any broker certificate\n"
@@ -506,6 +552,7 @@ BIND_MOUNT_TEMPLATES = {
     "camera": (
         "# Local camera: stock app_start.sh runs ./agora, which is tserver now\n"
         "mount --bind /app/bin/tserver /app/bin/agora\n"
+        + AGORA_CHECKIN_BLOCK
     ),
     # ssh: no bind-mount needed (dropbear is not replacing a stock binary)
 }

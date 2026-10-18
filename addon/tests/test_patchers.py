@@ -2,6 +2,7 @@
 and the unified app_init.sh wrapper generator."""
 import json
 import os
+import re
 
 from petkit_local.devices.base import Device
 from petkit_local.patchers.common import (
@@ -189,6 +190,49 @@ def test_wrapper_camera_never_uses_a_shell_placeholder():
     agora_mount = next(l for l in w.split("\n") if "mount --bind" in l and "agora" in l)
     assert not agora_mount.rstrip().endswith(".sh")
     assert "fake_daemon" not in w
+
+
+def test_wrapper_camera_checks_in_for_agora():
+    """The W7H watchdog adds 1 to a per-process counter in /config_shm every 2 s
+    and kills the process once it passes 29; a process checks in by writing 0
+    there. tserver never writes agora's, so the wrapper must, or the watchdog
+    kills the streamer and every viewer's stream drops once a minute."""
+    w = generate_app_init_wrapper({"camera"})
+    lines = w.split("\n")
+    write = next(l.strip() for l in lines if "of=/dev/shm/config_shm" in l)
+    assert write.startswith("dd if=/dev/zero ")
+    assert " bs=4 " in write and " count=1 " in write
+    assert int(re.search(r"seek=(\d+)", write).group(1)) * 4 == 0x30B4
+    # Without notrunc, dd truncates the file at the write and shrinks the shared
+    # memory under every firmware process that maps it.
+    assert "conv=notrunc" in write
+    # Stops while tserver is down, so the watchdog still restarts a crashed one.
+    assert "pidof agora" in w
+    # Writes only into the layout it was read from: that watchdog build, and
+    # the shared memory at the size it had.
+    assert "dda400d6df9b38f226fba9b7776921d8" in w
+    assert "= 15328 ]" in w
+    # Runs in the background and is started before the stock init.
+    write_idx = next(i for i, l in enumerate(lines) if "of=/dev/shm/config_shm" in l)
+    stock_idx = next(i for i, l in enumerate(lines)
+                     if l.strip().startswith(". /app/script/app_init.sh"))
+    assert write_idx < stock_idx
+    assert any(l.strip().startswith("done ) &") for l in lines[write_idx:stock_idx])
+
+
+def test_wrapper_checks_in_for_agora_only_with_camera():
+    w = generate_app_init_wrapper({"ssh", "talk", "mqtt", "cloud", "cacert"})
+    assert "config_shm" not in w
+
+
+def test_wrapper_text_survives_the_printf_upload():
+    """build_wrapper_upload_cmd writes the wrapper with printf, which reads the
+    whole text as its FORMAT string: a backslash or % in any block would be
+    rewritten on the way to the device (printf turns a literal \\000 into a
+    NUL byte)."""
+    w = generate_app_init_wrapper({"ssh", "talk", "mqtt", "cloud", "cacert", "camera"})
+    assert "%" not in w
+    assert "\\" not in w
 
 
 def test_wrapper_talk_only():

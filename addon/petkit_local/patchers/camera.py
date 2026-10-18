@@ -6,8 +6,9 @@ line `./agora &` starts the local streamer instead. tserver reads frames from
 the same POSIX shm `media` writes to, so it needs media running and nothing
 else.
 
-No binary patching and no file of ours on the device — the whole patch is one
-line in the /system/app_init.sh wrapper.
+No binary patching and no file of ours on the device — the whole patch is the
+bind-mount line in the /system/app_init.sh wrapper, plus, on the W7H watchdog
+build, a loop that checks in for agora (`AGORA_CHECKIN_*` in common.py).
 
 **Never point Home Assistant's Generic Camera straight at the device.** HA's
 `stream` component opens the URL with PyAV and `av.open()` segfaults inside
@@ -95,15 +96,18 @@ PATCHER_INFO = {
         "go2rtc exists here to stand between the two, and it also spares "
         "the device a connection per viewer by keeping just one open.\n\n"
         "What it does: bind-mounts /app/bin/tserver over /app/bin/agora, so the "
-        "stock startup line './agora &' launches the local streamer. Nothing is "
+        "stock startup line './agora &' launches the local streamer. No file is "
         "written to the device - removing the patch and rebooting restores "
         "Agora exactly.\n\n"
-        "Known side effect: the firmware watchdog logs 'kill agora' and 'reboot "
-        "agora' once a minute. Every stock process feeds the watchdog by calling "
-        "its own *_feed_dog; tserver is a different binary and never does, so "
-        "the watchdog decides Agora died. Measured on a T5 over 16 minutes: the "
-        "kill never lands, tserver keeps the same PID, its memory stays flat and "
-        "the device does not reboot - but the log says otherwise once a minute.\n\n"
+        "The firmware watchdog: every stock process checks in with it by "
+        "calling its own *_feed_dog; tserver is a different binary and never "
+        "does, so the watchdog decides Agora died. Measured on a T5 over 16 "
+        "minutes: it logs 'kill agora' and 'reboot agora' once a minute, but "
+        "the kill never lands, tserver keeps the same PID, its memory stays "
+        "flat and the device does not reboot. On a W7H fountain (firmware 456) "
+        "the kill does land and the stream dropped every minute, so there the "
+        "patch also checks in for Agora from the boot script; tserver then "
+        "keeps running.\n\n"
         "The PetKit app's live view will stop working - use the RTSP URL above "
         "instead.\n\n"
         "One rough edge: the device needs a few seconds between connections, so "
@@ -112,7 +116,7 @@ PATCHER_INFO = {
         "it."
     ),
     # Pure bind-mount: no file of ours lands on the device, so removal is just
-    # dropping the line from the wrapper and rebooting.
+    # dropping the lines from the wrapper and rebooting.
     "files": [],
     # No architecture: this bind-mounts one binary the device already ships
     # over another. Both are whatever the device was built with.
