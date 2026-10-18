@@ -195,6 +195,54 @@ async def test_accepted_evidence_is_revalidated_and_can_be_revoked(tmp_path, mon
         await store.close()
 
 
+async def test_newer_emergency_replaces_older_normal_attribution_for_alerts_only(tmp_path, monkeypatch):
+    app, store, c, now, archie, holly, requests, rev = await scene(tmp_path, monkeypatch)
+    try:
+        a = next(r for r in requests if r["pet_id"] == archie["id"])
+        h = next(r for r in requests if r["pet_id"] == holly["id"])
+        ordinary = {
+            "label": str(archie["id"]), "confidence": 1.0, "crops": 4,
+            "model_seq": 21, "input_rev": rev,
+        }
+        await db.put_guess(store, FOUNTAIN, "new", ordinary)
+        # Finish Archie's check without extra emergency evidence so its
+        # original grace period cannot conceal stale normal attribution.
+        empty = {"model_seq": 21, "validation_passed": True, "answers": []}
+        assert (await c.post("/api/fountain/model/alert-checks/" + a["id"], json=empty)).status == 200
+        assert (await c.post("/api/fountain/model/alert-checks/" + h["id"],
+                             json=result(holly["id"], rev, 22))).status == 200
+        active = await db.active_alerts(store)
+        assert any(r["subject"] == f"pet:{archie['id']}"
+                   and r["kind"] in (alerts.KIND_NO_DRINK, pre_alert.KIND_UNCONFIRMED)
+                   for r in active)
+        assert any(r["subject"] == f"pet:{holly['id']}"
+                   and r["kind"] == pre_alert.KIND_UNVALIDATED for r in active)
+        assert (await db.guesses_for(store, FOUNTAIN))["new"] == {
+            **ordinary, "scored_at": now[0]}
+    finally:
+        await c.close()
+        await store.close()
+
+
+@pytest.mark.parametrize("normal_label", ["other", "not_sure"])
+async def test_newer_normal_assessment_also_revokes_emergency_attribution(tmp_path, monkeypatch, normal_label):
+    app, store, c, now, archie, holly, requests, rev = await scene(tmp_path, monkeypatch)
+    try:
+        a = next(r for r in requests if r["pet_id"] == archie["id"])
+        assert (await c.post("/api/fountain/model/alert-checks/" + a["id"],
+                             json=result(archie["id"], rev, 25))).status == 200
+        label = str(holly["id"]) if normal_label == "other" else "not_sure"
+        await db.put_guess(store, FOUNTAIN, "new", {
+            "label": label, "confidence": 1.0, "crops": 4, "model_seq": 26, "input_rev": rev})
+        await alerts.check_app(app)
+        assert not any(row["kind"] == pre_alert.KIND_UNVALIDATED
+                       for row in await db.active_alerts(store))
+        assert (await db.guesses_for(store, FOUNTAIN))["new"]["label"] == label
+    finally:
+        await c.close()
+        await store.close()
+
+
 async def test_semantic_transition_gets_new_identity_but_poll_does_not(tmp_path, monkeypatch):
     app, store, c, now, archie, holly, requests, rev = await scene(tmp_path, monkeypatch)
     try:
@@ -223,7 +271,7 @@ async def test_actual_alert_loop_wakes_at_deadline_and_immediately_on_restart(mo
     monkeypatch.setattr(alerts, "state_of", lambda app: type("State", (), {"alert_wake": wake})())
     monkeypatch.setattr(alerts.time, "time", lambda: now[0])
 
-    async def check(app):
+    async def check(app, **kwargs):
         times.append(now[0])
         if now[0] >= deadline:
             raise asyncio.CancelledError
@@ -246,3 +294,38 @@ async def test_actual_alert_loop_wakes_at_deadline_and_immediately_on_restart(mo
     with pytest.raises(asyncio.CancelledError):
         await alerts.alert_loop(app)
     assert times[0] == start and times[-1] == max(start, deadline)
+
+
+@pytest.mark.parametrize("start,finish,sleep", [(599.5, 600.25, 0), (600.25, 600.3, 60)])
+async def test_deadline_crossed_during_reconciliation_is_not_lost(tmp_path, monkeypatch, start, finish, sleep):
+    app, _, store, _ = _panel(tmp_path)
+    await state_of(app).tables.ensure(store)
+    await db.ensure_pre_alert(store, "synthetic-gap", 1, {"visits": []}, 0, 600)
+    now, times, sleeps = [start], [], []
+    monkeypatch.setattr(alerts.time, "time", lambda: now[0])
+
+    async def check(app, now=None):
+        times.append(now)
+        if len(times) == 1:
+            # Database work crosses the absolute deadline after deciding
+            # whether the request was still waiting at the snapshot time.
+            clock[0] = finish
+        else:
+            raise asyncio.CancelledError
+
+    async def wait(coro, timeout):
+        coro.close()
+        sleeps.append(timeout)
+        clock[0] += timeout
+        raise TimeoutError
+
+    clock = now
+    monkeypatch.setattr(alerts, "check_app", check)
+    monkeypatch.setattr(alerts.asyncio, "wait_for", wait)
+    try:
+        with pytest.raises(asyncio.CancelledError):
+            await alerts.alert_loop(app)
+        assert sleeps == [sleep]
+        assert times == [start, finish + sleep]
+    finally:
+        await store.close()

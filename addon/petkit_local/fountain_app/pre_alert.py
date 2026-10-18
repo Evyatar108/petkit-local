@@ -16,7 +16,7 @@ from petkit_local.fountain_app.api import _store
 from petkit_local.fountain_app.model_guess import READY, _answer, visit_input
 from petkit_local.fountain_app.settings import settings_of
 from petkit_local.fountain_app.state import state_of
-from petkit_local.fountain_app.stats import MODEL_CONFIDENT
+from petkit_local.fountain_app.stats import MODEL_CONFIDENT, attributed
 from petkit_local.web.api._common import _json_body, _pets_by_id, _refuse
 
 WAIT_SEC = 600
@@ -56,11 +56,29 @@ def reduce_assessments(checks: list[dict[str, Any]]) -> dict[tuple[int, str, str
     return found
 
 
-async def current_evidence(store, records: list[dict], media_root: str,
-                           now: float) -> dict[int, dict]:
-    assessments = reduce_assessments(await db.pre_alert_checks(store))
-    evidence = {}
+async def resolve_alert_records(store, records: list[dict], media_root: str,
+                                 now: float) -> tuple[list[dict], dict[int, dict]]:
+    """One current model assessment per drink, combining normal and emergency.
+
+    Only these alert-local copies change. Normal graph/visit guesses stay intact.
+    """
+    checks = await db.pre_alert_checks(store)
     for record in records:
+        normal = record["guess"]
+        if normal is not None:
+            checks.append({"result": {
+                "model_seq": normal["model_seq"], "validation_passed": True,
+                "answers": [{
+                    **normal, "device_id": record["device_id"],
+                    "visit_key": record["visit"]["visit_key"],
+                }],
+            }})
+    assessments = reduce_assessments(checks)
+    evidence = {}
+    resolved = []
+    for record in records:
+        record = {**record}
+        resolved.append(record)
         if record["label"] is not None:
             continue
         visit = record["visit"]
@@ -72,25 +90,31 @@ async def current_evidence(store, records: list[dict], media_root: str,
             continue
         current = await asyncio.to_thread(visit_input, visit, media_root, now)
         answer = next((a for a in candidates if a["input_rev"] == current["input_rev"]), None)
-        if (answer is None or current["readiness"] != READY
-                or not answer["label"].isdigit() or answer["confidence"] < MODEL_CONFIDENT
-                or answer["crops"] <= 0
-                or answer["model_seq"] < (record["guess"] or {}).get("model_seq", 0)):
-            continue
-        normal = record["guess"] or {}
-        if (normal.get("input_rev") == answer["input_rev"]
-                and normal.get("model_seq", -1) >= answer["model_seq"]):
+        qualified = (
+            answer is not None and current["readiness"] == READY
+            and answer["label"].isdigit() and answer["confidence"] >= MODEL_CONFIDENT
+            and answer["crops"] > 0)
+        # Newer uncertainty or a stale normal revision cannot leave an older
+        # model attribution counting independently for a different cat.
+        record["attributed"] = attributed(visit, None, answer if qualified else None, True)
+        record["unvalidated"] = bool(qualified and not answer["validation_passed"])
+        if not record["unvalidated"]:
             continue
         pid = int(answer["label"])
         if pid not in evidence or visit["start_ts"] > evidence[pid]["start_ts"]:
             evidence[pid] = {**answer, "start_ts": visit["start_ts"]}
-    return evidence
+    return resolved, evidence
 
 
-async def pending_deadline(store, now: float) -> float | None:
+async def pending_deadline(store, reconciled_at: float) -> float | None:
+    """Include deadlines crossed after the current reconciliation snapshot.
+
+    A follow-up check taken after expiry excludes that already-processed
+    deadline, so a zero-delay recheck does not become a busy loop.
+    """
     pending = [
         row["deadline"] for row in await db.pre_alert_checks(store)
-        if row["result"] is None and row["deadline"] > now
+        if row["result"] is None and row["deadline"] > reconciled_at
     ]
     return min(pending, default=None)
 

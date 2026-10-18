@@ -208,10 +208,15 @@ async def _no_drink_alerts(store, device_ids: list[int], pets: dict[int, str | N
         return {}
     records = await _drinking_records(
         store, device_ids, since - LAST_DRINK_LOOKBACK_SEC, now + 1, use_model)
+    if use_model:
+        records, emergency = await pre_alert.resolve_alert_records(store, records, media_root, now)
+    else:
+        emergency = {}
     recent = [r for r in records if r["visit"]["start_ts"] >= since]
-    drank = {r["attributed"] for r in recent}
-    emergency = await pre_alert.current_evidence(store, records, media_root, now) if use_model else {}
-    unresolved = [r for r in recent if r["attributed"] == "unknown"]
+    drank = {r["attributed"] for r in recent if not r.get("unvalidated")}
+    # An emergency-only guess can answer its named pet's check, but is not
+    # validated identification for prematurely ending another pet's wait.
+    unresolved = [r for r in recent if r["attributed"] == "unknown" or r.get("unvalidated")]
     candidates = [r for r in unresolved if r["label"] is None]
     out: dict[str, tuple[str, dict[str, Any]]] = {}
     for pid, name in sorted(pets.items()):
@@ -341,15 +346,16 @@ async def alert_loop(app: web.Application) -> None:
     state = state_of(app)
     while True:
         state.alert_wake.clear()
+        reconciled_at = time.time()
         try:
-            await check_app(app)
+            await check_app(app, now=reconciled_at)
         except Exception:
             log.exception("fountain app: alert check failed")
         delay = CHECK_INTERVAL_SEC
         store = app.get("event_store")
         if store is not None:
             try:
-                deadline = await pre_alert.pending_deadline(store, time.time())
+                deadline = await pre_alert.pending_deadline(store, reconciled_at)
                 if deadline is not None:
                     delay = min(delay, max(0, deadline - time.time()))
             except Exception:
