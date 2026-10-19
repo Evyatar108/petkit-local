@@ -288,6 +288,29 @@ def test_fountain_codes_map_to_drinking_and_pet():
     assert codes.lookup("24", "w7h").kind == codes.KIND_PET
 
 
+def test_fountain_water_jobs_over_http_are_cleaning_and_named_by_their_action():
+    """A W7H on HTTP, 2026-10-18: 3 opens a job (`action` 1 flush, 2 refill,
+    5 water change) and 8, 9, 10 close one. They rendered as "Event 3".."Event
+    10" and counted no cleaning."""
+    from petkit_local.events import decode
+
+    for code, label in (("8", "Flush done"), ("9", "Refill done"),
+                        ("10", "Water change done")):
+        row = codes.lookup(code, "w7h")
+        assert (row.kind, row.label, row.role, row.anchor) == (
+            codes.KIND_CLEANING, label, codes.ROLE_DONE, True), code
+        assert row.grade == codes.INFERRED, code
+    start = codes.lookup("3", "w7h")
+    assert (start.kind, start.role, start.mode_from) == (
+        codes.KIND_CLEANING, codes.ROLE_START, "action")
+    assert decode.event_label("3", {"action": 5}, "w7h").startswith("Water change")
+    assert decode.event_label("3", {"action": 1}, "w7h").startswith("Flush")
+    # A litter box's 3 and 8, and a feeder's 3, keep their own meanings.
+    assert codes.lookup("3", "t5").label == "Mechanism started"
+    assert codes.lookup("8", "t5").label != "Flush done"
+    assert codes.lookup("3", "d4sh").kind == codes.KIND_FEEDING
+
+
 def test_fountain_code_5_does_not_collide_with_litter_code_5():
     """Code 5 is drink_start on a fountain and cleaning done on a litter box."""
     fountain = codes.lookup("5", "w7h")

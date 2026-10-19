@@ -536,6 +536,41 @@ FOUNTAIN_HTTP_CODES: dict[str, EventCode] = {
              "vomit_info}. Emitted as INVALID JSON (bare related_event "
              "token) -- same quirk as litter code 24.",
     ),
+    # The water-treatment jobs over HTTP: the `work_start` / `flush_over` /
+    # `add_water_over` / `water_change_over` of the MQTT table below, as a W7H
+    # (fw 456) reports them while on HTTP. Read off the live fountain's
+    # scheduled runs, 2026-10-17/18: each job opens with a 3 whose `action`
+    # names it, and closes with 8, 9 or 10 a run later
+    # (09:00:06 3 action=5 -> 09:00:44 10; 10:00:06 3 action=1 -> 10:00:25 8;
+    # 10:00:28 3 action=2 -> 10:00:58 9; the refill follows every flush).
+    # INFERRED: the pairing is from that sequence, not from the firmware.
+    "3": EventCode(
+        kind=KIND_CLEANING, label="Work started", grade=INFERRED, detail=True,
+        role=ROLE_START, mode_from="action", families=FOUNTAIN_NEXT_GEN,
+        note="Content {pos, reason, item_id, action}; action is a W7H work "
+             "mode (FOUNTAIN_W7H_WORK_MODES). Observed 2026-10-17/18.",
+    ),
+    "8": EventCode(
+        kind=KIND_CLEANING, label="Flush done", grade=INFERRED, anchor=True,
+        role=ROLE_DONE, done_word="flushing", families=FOUNTAIN_NEXT_GEN,
+        note="Closes a code 3 with action 1. Content {img, aesKey, mark, "
+             "upload, media, event_start, event_end, start_time, "
+             "start_reason, result, err}. Observed 2026-10-18.",
+    ),
+    "9": EventCode(
+        kind=KIND_CLEANING, label="Refill done", grade=INFERRED, anchor=True,
+        role=ROLE_DONE, done_word="refilling", families=FOUNTAIN_NEXT_GEN,
+        note="Closes a code 3 with action 2: after every flush, and on its "
+             "own when the bowl runs low. Same content as code 8. Observed "
+             "2026-10-15 to 2026-10-18.",
+    ),
+    "10": EventCode(
+        kind=KIND_CLEANING, label="Water change done", grade=INFERRED,
+        anchor=True, role=ROLE_DONE, done_word="changing the water",
+        families=FOUNTAIN_NEXT_GEN,
+        note="Closes a code 3 with action 5. Same content as code 8. "
+             "Observed 2026-10-17 and 2026-10-18.",
+    ),
 }
 
 #: Category name -> its HTTP code table. Categories with no recovered codes map
