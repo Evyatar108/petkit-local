@@ -40,6 +40,7 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 
     from petkit_local.devices.base import Device
 
+
 @dataclass(frozen=True)
 class Services:
     """Everything `main()` built, named rather than positional.

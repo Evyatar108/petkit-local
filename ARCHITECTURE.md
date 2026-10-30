@@ -21,6 +21,7 @@ see [`addon/DOCS.md`](addon/DOCS.md).)
 petkit_local/
 ├── main/          process lifecycle: cli -> wiring -> lifecycle
 ├── config.py      every tunable, from /data/options.json + Supervisor + CLI + panel
+├── timezone.py    runtime clock correction and shared HTTP/MQTT timezone writes
 ├── http/          the cloud a device believes it is talking to
 │   ├── server.py      route table, and the catch-all that must stay last
 │   ├── handlers/      one module per endpoint

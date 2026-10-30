@@ -546,7 +546,13 @@ async function setTimezone(id, offset) {
   if (!r.ok) return toast('Error: ' + (r.error || 'failed'));
   // "Sent" is not "visible": the device applies it at once but only echoes it
   // back on its next property post, which arrives on its own schedule.
-  toast(r.delivered === 'mqtt' ? 'Sent to the device' : 'Saved — applies on its next check-in');
+  toast(
+    r.delivered === 'superseded'
+      ? 'Replaced by a newer timezone setting'
+      : r.delivered === 'mqtt'
+        ? 'Sent to the device'
+        : 'Saved — applies on its next check-in',
+  );
   loadDevices();
 }
 

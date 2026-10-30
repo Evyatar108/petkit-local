@@ -109,7 +109,7 @@ def split_bucket_authority(bucket_endpoint: str) -> tuple[str, str] | None:
 
 @dataclass
 class TimezoneCorrection:
-    """Unacknowledged runtime clock writes for one target, never persisted."""
+    """Automatic write budget and last manual/automatic send, never persisted."""
 
     target: float
     attempts: int = 0
@@ -345,8 +345,8 @@ class Device:
         watermarks — the firmware does not take its clock from this response.
         It CAN be fixed without re-provisioning, though: a `property.set`
         carrying `timezone` as a JSON STRING moves it, verified on a live T5.
-        `web/api/devices.py::api_timezone` is the path that does both, and the
-        string is not a detail — see the note there.
+        `web/api/devices.py::api_timezone` is the manual path that does both,
+        through the shared `timezone.py::push_timezone` sender.
         """
         override = to_float(self.config.get("timezone"), None)
         if override is not None:

@@ -245,5 +245,8 @@ BuildKit's own `TARGETARCH` (which is what the go2rtc download does). The image 
   only field in a whole run of `===== set X (%d) =====` handlers read as `%s`. Readback is LOSSY —
   the device reports its own `%.1f`, so `5.75` comes back as `5.8`. HTTP `dev_device_info` still
   wants a NUMBER for the same field.
+  HTTP/MQTT drift checks and the manual control share `timezone.py`. A matching echo must not
+  erase its automatic write budget or cooldown: firmware can apply the change briefly and
+  revert. Signup or a new target resets the budget; manual writes only start the cooldown.
 - **K2/K3 entity definitions assume a WiFi purifier** that does not exist — both models are
   BLE-only today.

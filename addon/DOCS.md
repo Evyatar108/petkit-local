@@ -161,10 +161,13 @@ Automatic correction waits ten minutes between attempts, starting when a
 command is queued or published, not when the device applies it. Heartbeat
 delivery is at-most-once: a lost response can delay the next attempt by the
 full ten minutes. Retries need another report; no background timer sends them.
-After three attempts without a matching report, correction stops and logs one
-warning. A matching report, a new target offset, or a new signup resets that
-history. Removal and server restart also discard it. The manual control
-remains available after automatic correction stops.
+After three automatic writes for the same target in one signup session,
+correction stops and logs one warning if another wrong report arrives. A
+matching report does not reset the budget or cooldown: some firmware applies
+the change briefly and then reverts. A new target offset or signup resets
+that history. Removal and server restart also discard it. The manual control
+remains available after automatic correction stops and starts the same
+cooldown without consuming or resetting the automatic budget.
 
 This corrects the runtime clock, not the firmware's saved timezone. Some
 firmware loses the change on reboot or rewrites its saved timezone. A settings

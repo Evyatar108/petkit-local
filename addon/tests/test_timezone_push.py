@@ -7,11 +7,14 @@ import pytest
 from aiohttp.test_utils import TestClient, TestServer
 
 from petkit_local.devices.base import Device
+from petkit_local.devices.ble import BLERegistry
 from petkit_local.devices.registry import DeviceRegistry
 from petkit_local.http.server import create_app
 from petkit_local.main.wiring import _on_signup, _on_state_report
 from petkit_local.mqtt.bridge import MQTTBridge
 from petkit_local.timezone import correct_timezone_if_drifted, push_timezone
+from petkit_local.web.hub import EventHub
+from petkit_local.web.panel import create_panel_app
 from tests._fakes import FakeMqttClient
 
 
@@ -174,15 +177,39 @@ async def test_three_non_echoed_attempts_stop_and_warn_once(caplog):
     assert sum("stopping automatic correction" in r.message for r in caplog.records) == 1
     assert await push_timezone(device, 5.5) == "heartbeat-queue"
     assert _timezone_pushes(device)[0]["params"] == {"timezone": "5.5"}
+    assert device.timezone_correction.attempts == 3
+    assert not await correct_timezone_if_drifted(device, "0", now=4000)
 
 
-async def test_a_matching_echo_allows_a_later_drift_to_be_corrected():
+async def test_a_matching_echo_preserves_the_cooldown_and_attempt_budget():
     device = _device()
     assert await correct_timezone_if_drifted(device, "0", now=1000)
     device.pop_commands()
     assert not await correct_timezone_if_drifted(device, "5.5", now=1030)
-    assert device.timezone_correction is None
-    assert await correct_timezone_if_drifted(device, "0", now=1060)
+    assert device.timezone_correction.attempts == 1
+    assert not await correct_timezone_if_drifted(device, "0", now=1060)
+    assert await correct_timezone_if_drifted(device, "0", now=1600)
+
+
+async def test_brief_successful_echoes_cannot_permit_endless_writes():
+    device = _device()
+    pushes = 0
+    for now in range(1000, 3400, 240):
+        pushes += await correct_timezone_if_drifted(device, "0", now=now)
+        device.pop_commands()
+        assert not await correct_timezone_if_drifted(device, "5.5", now=now + 51)
+    assert pushes == 3
+    assert device.timezone_correction.attempts == 3
+
+
+async def test_a_manual_push_starts_the_cooldown_without_spending_the_auto_budget():
+    device = _device()
+    await push_timezone(device, 5.5, now=1000)
+    device.pop_commands()
+    assert device.timezone_correction.attempts == 0
+    assert not await correct_timezone_if_drifted(device, "0", now=1030)
+    assert await correct_timezone_if_drifted(device, "0", now=1600)
+    assert device.timezone_correction.attempts == 1
 
 
 async def test_a_new_target_does_not_inherit_the_previous_targets_cap():
@@ -254,3 +281,66 @@ async def test_concurrent_reports_reserve_only_one_mqtt_attempt():
         release.set()
         await first
     assert device.timezone_correction.attempts == 1
+
+
+async def test_an_old_failed_mqtt_push_cannot_replace_a_newer_manual_target():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class FailingBridge:
+        async def publish_to_device(self, _device, _suffix, envelope):
+            if envelope["params"]["timezone"] == "5.5":
+                started.set()
+                await release.wait()
+            raise ConnectionError("disconnected")
+
+    device = _device()
+    device.mqtt_connected = True
+    bridge = FailingBridge()
+    first = asyncio.create_task(
+        correct_timezone_if_drifted(device, "0", bridge, now=1000))
+    try:
+        await started.wait()
+        device.config["timezone"] = 6
+        assert await push_timezone(device, 6, bridge) == "heartbeat-queue"
+    finally:
+        release.set()
+        await first
+    assert [c["params"] for c in device.command_queue] == [{"timezone": "6"}]
+
+
+async def test_a_superseded_manual_request_returns_the_current_choice():
+    started, release = asyncio.Event(), asyncio.Event()
+
+    class FailingBridge:
+        async def publish_to_device(self, _device, _suffix, envelope):
+            if envelope["params"]["timezone"] == "5.5":
+                started.set()
+                await release.wait()
+            raise ConnectionError("disconnected")
+
+    registry = DeviceRegistry()
+    device = registry.get_or_create(1, "w7h", serial_number="SN")
+    device.mqtt_connected = True
+    app = create_panel_app(registry, BLERegistry(), EventHub(),
+                           {"api_url": "http://server/6/"}, FailingBridge())
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    first = asyncio.create_task(client.post("/api/devices/1/timezone", json={"timezone": 5.5}))
+    try:
+        await started.wait()
+        newer = await client.post("/api/devices/1/timezone", json={"timezone": 6})
+        assert (await newer.json())["delivered"] == "heartbeat-queue"
+        release.set()
+        response = await first
+        # Existing response keys stay unchanged. Only the delivery outcome
+        # needs a new value, so callers do not mistake a skipped write for one
+        # queued for a later heartbeat.
+        assert await response.json() == {
+            "ok": True, "delivered": "superseded", "effective": 6,
+            "override": 6, "reported": None, "locale": "", "source": "override",
+        }
+        assert [c["params"] for c in device.command_queue] == [{"timezone": "6"}]
+    finally:
+        release.set()
+        await first
+        await client.close()

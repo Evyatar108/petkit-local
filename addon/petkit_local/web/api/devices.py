@@ -153,7 +153,7 @@ def _timezone_view(d: Device) -> dict[str, Any]:
     All are shown because an effective `0.0` otherwise gives no clue whether UTC
     was chosen or merely inherited — and a device provisioned before the BLE
     payload carried a timezone reports exactly that. `source` names which rung of
-    `Device.timezone_offset` actually won, so `locale` here means the offset was
+    `Device.resolved_timezone` actually used, so `locale` here means the offset was
     recovered from the zone name the device sent, not from the number it did.
     """
     override = to_float(d.config.get("timezone"), None)
@@ -358,6 +358,10 @@ async def api_timezone(request: web.Request) -> web.Response:
     Readback is lossy: the device reports its own `%.1f`, so `5.75` comes back
     as `5.8`. Delivery is immediate but the echo waits for an irregular
     `property/post`, so "sent" is not "visible".
+
+    `delivered` is "mqtt", "heartbeat-queue", or "superseded" if a newer
+    timezone choice replaced this request while its MQTT publish was awaiting
+    failure. The returned timezone view always reflects the current choice.
     """
     reg = request.app["registry"]
     d = _device_or_404(request)
@@ -392,9 +396,10 @@ async def api_timezone(request: web.Request) -> web.Response:
     # fired its scheduled meals two hours late.
     hub = request.app["hub"]
     bridge = request.app.get("bridge")
-    delivered = await push_timezone(d, d.timezone_offset, bridge)
+    offset = d.timezone_offset
+    delivered = await push_timezone(d, offset, bridge)
     hub.record_command(d.petkit_id, delivered,
-                       f"{PROPERTY_SET_SUFFIX} timezone={d.timezone_offset:g}")
+                       f"{PROPERTY_SET_SUFFIX} timezone={offset:g}")
 
     return web.json_response({"ok": True, "delivered": delivered, **_timezone_view(d)})
 
