@@ -44,6 +44,7 @@ from petkit_local.mqtt.topics import (
 from petkit_local.utils.capture import capture_record
 from petkit_local.utils.dicts import dig
 from petkit_local.utils.logtext import excerpt, payload_text
+from petkit_local.timezone import correct_timezone_if_drifted
 
 if TYPE_CHECKING:
     from petkit_local.ai.pets import PetRegistry
@@ -445,6 +446,7 @@ class MQTTBridge:
 
         if event_type == "property":
             if params:
+                await correct_timezone_if_drifted(device, params.get("timezone"), self)
                 # Raw nested, for the panel's Debug info and the echoes -- but
                 # WITHOUT the transport envelope. Every property post carries
                 # `XDevice`, the signed request credential, and merging it here

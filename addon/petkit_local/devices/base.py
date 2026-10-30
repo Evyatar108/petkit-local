@@ -108,6 +108,16 @@ def split_bucket_authority(bucket_endpoint: str) -> tuple[str, str] | None:
 
 
 @dataclass
+class TimezoneCorrection:
+    """Unacknowledged runtime clock writes for one target, never persisted."""
+
+    target: float
+    attempts: int = 0
+    last_attempt: float = float("-inf")
+    warned: bool = False
+
+
+@dataclass
 class Device:
     """One registered PetKit device: its identity, credentials and live state.
 
@@ -152,6 +162,7 @@ class Device:
     # (`patchers/common.py` queues the encoded form); the heartbeat handler
     # passes both through unchanged.
     command_queue: list[Any] = field(default_factory=list)
+    timezone_correction: TimezoneCorrection | None = None
 
     last_heartbeat: float = 0.0
     last_state_report: float = 0.0
@@ -304,8 +315,8 @@ class Device:
         return self.api_secret or self.mqtt_device_secret
 
     @property
-    def timezone_offset(self) -> float:
-        """Hours east of UTC to report to the device, e.g. 2.0 for CEST.
+    def resolved_timezone(self) -> tuple[float, str]:
+        """Hours east of UTC and the source that supplied the offset.
 
         Four sources, most specific first:
 
@@ -339,14 +350,19 @@ class Device:
         """
         override = to_float(self.config.get("timezone"), None)
         if override is not None:
-            return override
+            return override, "override"
         from_locale = offset_hours_for_locale(self.config.get("locale"))
         if from_locale is not None:
-            return from_locale
+            return from_locale, "locale"
         reported = to_float(self.config.get("reported_timezone"), None)
         if reported is not None:
-            return reported
-        return local_offset_hours()
+            return reported, "device"
+        return local_offset_hours(), "server"
+
+    @property
+    def timezone_offset(self) -> float:
+        """Hours east of UTC to report in HTTP device-info responses."""
+        return self.resolved_timezone[0]
 
     @property
     def aliyun_mqtt_host(self) -> str:

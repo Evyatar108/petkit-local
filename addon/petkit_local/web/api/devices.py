@@ -10,7 +10,6 @@ for anything scripting the API, and share their bodies with the detail.
 """
 from __future__ import annotations
 
-import logging
 from typing import TYPE_CHECKING, Any
 
 from aiohttp import web
@@ -21,19 +20,16 @@ from petkit_local.devices.state_parsers import apply_consumable_state
 from petkit_local.ha.categories import get_entities_for_device
 from petkit_local.ha.commands import (
     ALL_ACTIONS, PROPERTY_SET_SUFFIX, Refused, handle_ha_command,
-    make_mqtt_property_set,
 )
 from petkit_local.media.go2rtc import stream_urls_with_rtsp
 from petkit_local.mqtt.broker import delivery_view
 from petkit_local.utils.coerce import to_float
-from petkit_local.utils.timeutil import offset_hours_for_locale
+from petkit_local.timezone import push_timezone
 from petkit_local.utils.const import device_display_name
 from petkit_local.utils.dicts import dig_path
 from petkit_local.web.api._common import (
     _deliver, _device_log_reason, _device_or_404, _json_body,
 )
-
-log = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from petkit_local.devices.ble import BLERegistry
@@ -162,15 +158,13 @@ def _timezone_view(d: Device) -> dict[str, Any]:
     """
     override = to_float(d.config.get("timezone"), None)
     reported = to_float(d.config.get("reported_timezone"), None)
-    from_locale = offset_hours_for_locale(d.config.get("locale"))
+    effective, source = d.resolved_timezone
     return {
-        "effective": d.timezone_offset,
+        "effective": effective,
         "override": override,
         "reported": reported,
         "locale": d.config.get("locale", ""),
-        "source": "override" if override is not None
-        else "locale" if from_locale is not None
-        else "device" if reported is not None else "server",
+        "source": source,
     }
 
 
@@ -398,20 +392,7 @@ async def api_timezone(request: web.Request) -> web.Response:
     # fired its scheduled meals two hours late.
     hub = request.app["hub"]
     bridge = request.app.get("bridge")
-    envelope = make_mqtt_property_set({"timezone": f"{d.timezone_offset:g}"})
-    mqtt_live = (d.mqtt_connected and bridge is not None
-                 and getattr(bridge, "_client", None))
-    delivered = "mqtt"
-    if mqtt_live:
-        try:
-            await bridge.publish_to_device(d, PROPERTY_SET_SUFFIX, envelope)
-        except Exception as exc:  # noqa: BLE001 - transport failure is not a rejection
-            log.warning("timezone push failed for device %d: %s", d.petkit_id, exc)
-            mqtt_live = False
-    if not mqtt_live:
-        envelope["_service_suffix"] = PROPERTY_SET_SUFFIX
-        d.command_queue.append(envelope)
-        delivered = "heartbeat-queue"
+    delivered = await push_timezone(d, d.timezone_offset, bridge)
     hub.record_command(d.petkit_id, delivered,
                        f"{PROPERTY_SET_SUFFIX} timezone={d.timezone_offset:g}")
 

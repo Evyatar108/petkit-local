@@ -147,11 +147,37 @@ There is no snapshot URL: the device answers every path with the same video
 stream, so the MQTT camera entity stays empty and the sensor carries the URL
 instead.
 
+## Runtime timezone correction
+
+HTTP state reports and MQTT `property/post` reports trigger a correction when
+their live offset differs from the manual override, valid locale, or offset
+remembered at signup. The server's own timezone is never used for automatic
+correction when those device-specific sources are absent. The command carries
+the offset as a JSON string, over MQTT for a connected device or through the
+next HTTP heartbeat otherwise. Readback is rounded to one decimal place, so
+`5.8` acknowledges a requested `5.75`.
+
+Automatic correction waits ten minutes between attempts, starting when a
+command is queued or published, not when the device applies it. Heartbeat
+delivery is at-most-once: a lost response can delay the next attempt by the
+full ten minutes. Retries need another report; no background timer sends them.
+After three attempts without a matching report, correction stops and logs one
+warning. A matching report, a new target offset, or a new signup resets that
+history. Removal and server restart also discard it. The manual control
+remains available after automatic correction stops.
+
+This corrects the runtime clock, not the firmware's saved timezone. Some
+firmware loses the change on reboot or rewrites its saved timezone. A settings
+write can announce "settings updated" and moving the clock can change when
+scheduled jobs run. Check the device's clock and schedules before relying on
+automatic correction as a durable fix.
+
 ## Provisioning over Bluetooth
 
 The **Provision** tab hands a device its Wi-Fi credentials, a custom `apiServers`
-URL and a timezone — which is the only way a device ever gets one, so a box
-provisioned without it stamps UTC onto its video until it is re-provisioned.
+URL and a timezone. A device provisioned without a timezone can stamp UTC
+onto its video. The Devices tab's timezone control can push a runtime
+correction without re-provisioning.
 
 Web Bluetooth only runs on a **secure page**, so this needs Home Assistant served
 over HTTPS with a certificate your browser trusts (a reverse proxy, or Home
